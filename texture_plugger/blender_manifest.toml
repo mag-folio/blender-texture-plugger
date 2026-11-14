@@ -1,0 +1,25 @@
+schema_version = "1.0.0"
+
+id = "texture_plugger"
+version = "1.0.0"
+name = "Texture Plugger"
+tagline = "Detect PBR texture maps by filename and wire up the material"
+maintainer = "Texture Plugger contributors"
+type = "add-on"
+
+tags = ["Material", "Node", "Import-Export"]
+
+blender_version_min = "4.5.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Read texture image files chosen by the user"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "*.pyc",
+  "/.git/",
+  "*.zip",
+]

@@ -1,0 +1,696 @@
+"""Headless Blender integration test for Texture Plugger.
+
+Run through tests/run_blender_tests.ps1, or manually:
+  blender --background --factory-startup --python-exit-code 1 \
+          --python tests/blender_test.py -- --zip dist/texture_plugger-1.0.0.zip
+  blender ... --python tests/blender_test.py -- --legacy        (package already in scripts/addons)
+
+Use an isolated BLENDER_USER_RESOURCES directory so your real config is untouched.
+"""
+
+import os
+import shutil
+import sys
+import tempfile
+import traceback
+
+import bpy
+
+ARGS = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+
+RESULTS = []
+
+
+def check(name, cond, detail=""):
+    RESULTS.append((name, bool(cond), detail))
+    print(("  PASS  " if cond else "  FAIL  ") + name + ("" if cond else f"  -- {detail}"))
+    return bool(cond)
+
+
+# --------------------------------------------------------------------------
+# Install / enable
+# --------------------------------------------------------------------------
+
+def install():
+    if "--legacy" in ARGS:
+        import addon_utils
+        mod = addon_utils.enable("texture_plugger", default_set=True, handle_error=None)
+        check("legacy add-on enabled", mod is not None)
+        return "texture_plugger"
+    zip_path = os.path.abspath(ARGS[ARGS.index("--zip") + 1])
+    check("zip exists", os.path.isfile(zip_path), zip_path)
+    bpy.ops.extensions.package_install_files(
+        filepath=zip_path, repo="user_default", enable_on_install=True)
+    module = "bl_ext.user_default.texture_plugger"
+    check("extension enabled", module in bpy.context.preferences.addons,
+          list(bpy.context.preferences.addons.keys()))
+    return module
+
+
+# --------------------------------------------------------------------------
+# Fixtures
+# --------------------------------------------------------------------------
+
+TMP = tempfile.mkdtemp(prefix="tp_blender_test_")
+
+
+def make_image(folder, name, rgba=(0.5, 0.5, 0.5, 1.0)):
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, name)
+    ext = os.path.splitext(name)[1].lower()
+    fmt = {".png": "PNG", ".jpg": "JPEG", ".exr": "OPEN_EXR", ".tif": "TIFF", ".tga": "TARGA"}[ext]
+    img = bpy.data.images.new("gen_" + name, 4, 4, alpha=True, float_buffer=(fmt == "OPEN_EXR"))
+    img.pixels = list(rgba) * 16
+    img.filepath_raw = path
+    img.file_format = fmt
+    img.save()
+    bpy.data.images.remove(img)
+    return path
+
+
+def make_set(sub, names):
+    folder = os.path.join(TMP, sub)
+    for n in names:
+        make_image(folder, n)
+    return folder
+
+
+def new_cube(name, location=(0, 0, 0)):
+    mesh = bpy.data.meshes.new(name)
+    import bmesh
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=1.0)
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.uv_layers.new(name="UVMap")
+    obj = bpy.data.objects.new(name, mesh)
+    obj.location = location
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+def select_only(*objs):
+    for o in bpy.context.view_layer.objects:
+        o.select_set(False)
+    for o in objs:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = objs[0] if objs else None
+
+
+def settings():
+    return bpy.context.scene.texture_plugger
+
+
+def load(folder, names=None, apply=True):
+    if names is None:
+        return bpy.ops.texture_plugger.load_set(directory=folder + os.sep, apply_after=apply)
+    return bpy.ops.texture_plugger.load_set(
+        directory=folder + os.sep, files=[{"name": n} for n in names], apply_after=apply)
+
+
+# --------------------------------------------------------------------------
+# Inspection helpers
+# --------------------------------------------------------------------------
+
+TAG = "texture_plugger"
+
+
+def tagged(nt):
+    return [n for n in nt.nodes if n.get(TAG) is not None]
+
+
+def by_role(nt, role):
+    return [n for n in nt.nodes if n.get(TAG) == role]
+
+
+def principled(nt):
+    return [n for n in nt.nodes if n.bl_idname == "ShaderNodeBsdfPrincipled"][0]
+
+
+def src_node(sock):
+    return sock.links[0].from_node if sock.is_linked else None
+
+
+def src_sock(sock):
+    return sock.links[0].from_socket if sock.is_linked else None
+
+
+def snapshot(mat):
+    nt = mat.node_tree
+    nodes = sorted((n.bl_idname, n.name, n.label, round(n.location.x), round(n.location.y))
+                   for n in nt.nodes)
+    links = sorted((l.from_node.name, l.from_socket.identifier, l.to_node.name, l.to_socket.identifier)
+                   for l in nt.links)
+    return nodes, links, len(bpy.data.images), len(bpy.data.materials)
+
+
+def image_cs(node):
+    return node.image.colorspace_settings.name if node and node.image else None
+
+
+# --------------------------------------------------------------------------
+# Tests
+# --------------------------------------------------------------------------
+
+def test_registration(module):
+    print("\n[registration]")
+    check("operator load_set", hasattr(bpy.ops.texture_plugger, "load_set"))
+    check("operator apply", hasattr(bpy.ops.texture_plugger, "apply"))
+    check("operator clear", hasattr(bpy.ops.texture_plugger, "clear"))
+    check("FileHandler registered", hasattr(bpy.types, "TEXTUREPLUGGER_FH_drop"))
+    check("3D view panel", hasattr(bpy.types, "TEXTUREPLUGGER_PT_view3d"))
+    check("shader editor panel", hasattr(bpy.types, "TEXTUREPLUGGER_PT_shader"))
+    check("scene settings", hasattr(bpy.context.scene, "texture_plugger"))
+    prefs = bpy.context.preferences.addons[module].preferences
+    check("preferences have keyword lists", "albedo" in prefs.kw_base_color)
+    menu_funcs = [f.__name__ for f in bpy.types.TOPBAR_MT_file_import._dyn_ui_initialize()]
+    check("File > Import entry", "menu_func_import" in menu_funcs, menu_funcs)
+
+
+def test_basic_set():
+    print("\n[basic ambientCG-style set: colour spaces, links, idempotency, clear]")
+    names = [
+        "Bricks076C_1K-PNG_Color.png", "Bricks076C_1K-JPG_Color.jpg",
+        "Bricks076C_1K-PNG_NormalGL.png", "Bricks076C_1K-PNG_NormalDX.png",
+        "Bricks076C_1K-PNG_Roughness.png", "Bricks076C_1K-PNG_Metalness.png",
+        "Bricks076C_1K-PNG_AmbientOcclusion.png", "Bricks076C_1K-PNG_Displacement.png",
+        "Bricks076C_1K-PNG_Displacement.exr",
+        "Bricks076C_1K-PNG_Opacity.png", "Bricks076C_1K-PNG_Emission.png",
+        "Bricks076C.png",
+    ]
+    folder = make_set("basic", names)
+    cube = bpy.data.objects["Cube"]
+    select_only(cube)
+    mat = cube.active_material
+    nt = mat.node_tree
+    user_node = nt.nodes.new("ShaderNodeValue")
+    user_node.name = "UserValueNode"
+    orig_disp = mat.displacement_method
+    bsdf = principled(nt)
+    orig_emit = bsdf.inputs["Emission Strength"].default_value
+    nodes_before = len(nt.nodes)
+
+    res = load(folder)  # folder only: scan
+    check("load_set finished", res == {"FINISHED"}, res)
+    s = settings()
+    types = {sl.map_type for sl in s.slots if sl.enabled}
+    check("slots detected", {"base_color", "normal_gl", "roughness", "metallic", "ao", "height",
+                             "opacity", "emission"} <= types, types)
+    dx = [sl for sl in s.slots if sl.map_type == "normal_dx"]
+    check("DX normal present but disabled (GL wins)", dx and not dx[0].enabled)
+    unassigned = [sl for sl in s.slots if sl.map_type == "NONE"]
+    check("preview file listed as unassigned", len(unassigned) == 1)
+    hslot = [sl for sl in s.slots if sl.map_type == "height"][0]
+    check("EXR chosen for displacement", hslot.filepath.endswith(".exr"), hslot.filepath)
+    cslot = [sl for sl in s.slots if sl.map_type == "base_color"][0]
+    check("PNG chosen over JPG for colour", cslot.filepath.endswith(".png"), cslot.filepath)
+
+    check("same material kept", cube.active_material == mat)
+    bsdf = principled(nt)
+    base_from = src_node(bsdf.inputs["Base Color"])
+    check("Base Color <- AO multiply mix", base_from is not None and base_from.bl_idname == "ShaderNodeMix"
+          and base_from.blend_type == "MULTIPLY", base_from)
+    a_sock = [i for i in base_from.inputs if i.identifier == "A_Color"][0]
+    b_sock = [i for i in base_from.inputs if i.identifier == "B_Color"][0]
+    col_img = src_node(a_sock)
+    ao_img = src_node(b_sock)
+    check("base colour image is sRGB", image_cs(col_img) == "sRGB", image_cs(col_img))
+    check("AO image Non-Color", image_cs(ao_img) == "Non-Color", image_cs(ao_img))
+    rough = src_node(bsdf.inputs["Roughness"])
+    check("Roughness linked, Non-Color", rough and image_cs(rough) == "Non-Color", image_cs(rough))
+    metal = src_node(bsdf.inputs["Metallic"])
+    check("Metallic linked, Non-Color", metal and image_cs(metal) == "Non-Color")
+    nm = src_node(bsdf.inputs["Normal"])
+    check("Normal <- Normal Map node", nm and nm.bl_idname == "ShaderNodeNormalMap", nm)
+    nimg = src_node(nm.inputs["Color"]) if nm else None
+    check("normal image Non-Color", image_cs(nimg) == "Non-Color", image_cs(nimg))
+    check("GL normal not flipped", nimg and nimg.bl_idname == "ShaderNodeTexImage")
+    out = [n for n in nt.nodes if n.bl_idname == "ShaderNodeOutputMaterial"][0]
+    disp = src_node(out.inputs["Displacement"])
+    check("Output Displacement <- Displacement node", disp and disp.bl_idname == "ShaderNodeDisplacement")
+    check("displacement midlevel/scale", disp and abs(disp.inputs["Midlevel"].default_value - 0.5) < 1e-6
+          and abs(disp.inputs["Scale"].default_value - 0.1) < 1e-6)
+    himg = src_node(disp.inputs["Height"]) if disp else None
+    check("height image Non-Color (EXR)", image_cs(himg) == "Non-Color", image_cs(himg))
+    check("displacement_method BOTH", mat.displacement_method == "BOTH", mat.displacement_method)
+    alpha = src_node(bsdf.inputs["Alpha"])
+    check("Alpha linked", alpha is not None and image_cs(alpha) == "Non-Color")
+    check("surface_render_method DITHERED", getattr(mat, "surface_render_method", "DITHERED") == "DITHERED")
+    check("transparent shadows on", getattr(mat, "use_transparent_shadow", True))
+    em = src_node(bsdf.inputs["Emission Color"])
+    check("Emission Color linked sRGB", em is not None and image_cs(em) == "sRGB", image_cs(em))
+    check("Emission Strength set to 1", abs(bsdf.inputs["Emission Strength"].default_value - 1.0) < 1e-6)
+
+    texco = by_role(nt, "texcoord")
+    mapping = by_role(nt, "mapping")
+    check("one shared TexCoord + Mapping", len(texco) == 1 and len(mapping) == 1)
+    imgs = [n for n in tagged(nt) if n.bl_idname == "ShaderNodeTexImage"]
+    check("every image driven by the shared Mapping",
+          imgs and all(src_node(i.inputs["Vector"]) == mapping[0] for i in imgs))
+    check("mapping driven by UV", src_sock(mapping[0].inputs["Vector"]).name == "UV")
+    frame = by_role(nt, "frame")
+    check("frame created", len(frame) == 1)
+    check("images parented to frame", all(i.parent == frame[0] for i in imgs))
+    if hasattr(imgs[0], "location_absolute"):
+        bx = bsdf.location.x
+        check("image column left of BSDF (absolute)",
+              all(abs(i.location_absolute.x - (bx - 1500)) < 1.0 for i in imgs),
+              [round(i.location_absolute.x) for i in imgs])
+    check("user node untouched", nt.nodes.get("UserValueNode") is not None)
+    check("all images single datablock per file",
+          len({i.image.name for i in imgs}) == len(imgs))
+
+    # Idempotency
+    snap1 = snapshot(mat)
+    bpy.ops.texture_plugger.apply()
+    snap2 = snapshot(mat)
+    check("apply twice -> identical nodes", snap1[0] == snap2[0],
+          (len(snap1[0]), len(snap2[0])))
+    check("apply twice -> identical links", snap1[1] == snap2[1])
+    check("apply twice -> no new images", snap1[2] == snap2[2], (snap1[2], snap2[2]))
+    load(folder)
+    snap3 = snapshot(mat)
+    check("load again -> identical result", snap1[:3] == snap3[:3], (len(snap1[0]), len(snap3[0])))
+
+    # Clear
+    res = bpy.ops.texture_plugger.clear()
+    check("clear finished", res == {"FINISHED"}, res)
+    check("no tagged nodes after clear", not tagged(nt))
+    check("node count restored", len(nt.nodes) == nodes_before, (len(nt.nodes), nodes_before))
+    check("user node survives clear", nt.nodes.get("UserValueNode") is not None)
+    check("displacement method restored", mat.displacement_method == orig_disp, mat.displacement_method)
+    check("emission strength restored",
+          abs(principled(nt).inputs["Emission Strength"].default_value - orig_emit) < 1e-6)
+    check("BSDF still connected to output", principled(nt).outputs["BSDF"].is_linked)
+    res = bpy.ops.texture_plugger.clear()
+    check("second clear is a no-op", res == {"CANCELLED"}, res)
+    nt.nodes.remove(user_node)
+
+
+def test_packed_dx_gloss():
+    print("\n[packed ORM + DirectX normal + gloss]")
+    folder = make_set("packed", ["Rock_BaseColor.png", "Rock_ORM.png", "Rock_Normal_DirectX.png"])
+    obj = new_cube("PackedCube", (3, 0, 0))
+    select_only(obj)
+    res = load(folder)
+    check("load packed finished", res == {"FINISHED"}, res)
+    mat = obj.active_material
+    check("material created for empty object", mat is not None and len(obj.material_slots) == 1)
+    nt = mat.node_tree
+    bsdf = principled(nt)
+    sep = by_role(nt, "separate:orm")
+    check("Separate Color for ORM", len(sep) == 1 and sep[0].bl_idname == "ShaderNodeSeparateColor")
+    sep = sep[0]
+    check("ORM image Non-Color", image_cs(src_node(sep.inputs["Color"])) == "Non-Color")
+    check("ORM image alpha channel-packed", src_node(sep.inputs["Color"]).image.alpha_mode == "CHANNEL_PACKED")
+    check("Green -> Roughness", src_sock(bsdf.inputs["Roughness"]) == sep.outputs["Green"])
+    check("Blue -> Metallic", src_sock(bsdf.inputs["Metallic"]) == sep.outputs["Blue"])
+    mix = src_node(bsdf.inputs["Base Color"])
+    b_sock = [i for i in mix.inputs if i.identifier == "B_Color"][0]
+    check("Red (AO) -> AO multiply", src_sock(b_sock) == sep.outputs["Red"])
+
+    nm = src_node(bsdf.inputs["Normal"])
+    comb = src_node(nm.inputs["Color"])
+    check("DX: Normal Map <- Combine Color", comb and comb.bl_idname == "ShaderNodeCombineColor", comb)
+    flip = src_node(comb.inputs["Green"])
+    check("DX: green from 1 - G math", flip and flip.bl_idname == "ShaderNodeMath"
+          and flip.operation == "SUBTRACT" and abs(flip.inputs[0].default_value - 1.0) < 1e-6)
+    dsep = src_node(flip.inputs[1])
+    check("DX: math fed by Separate Green", dsep and src_sock(flip.inputs[1]).name == "Green")
+    check("DX: red/blue passed through", src_sock(comb.inputs["Red"]).name == "Red"
+          and src_sock(comb.inputs["Blue"]).name == "Blue")
+
+    # Gloss
+    folder = make_set("gloss", ["Wood_Albedo.png", "Wood_Gloss.png", "Wood_Normal.png", "Wood_Bump.png"])
+    obj2 = new_cube("GlossCube", (6, 0, 0))
+    select_only(obj2)
+    load(folder)
+    nt = obj2.active_material.node_tree
+    bsdf = principled(nt)
+    inv = src_node(bsdf.inputs["Roughness"])
+    check("Gloss -> Invert -> Roughness", inv and inv.bl_idname == "ShaderNodeInvert", inv)
+    check("gloss image Non-Color", image_cs(src_node(inv.inputs["Color"])) == "Non-Color")
+    bump = src_node(bsdf.inputs["Normal"])
+    check("Normal <- Bump", bump and bump.bl_idname == "ShaderNodeBump", bump)
+    check("Bump.Normal <- Normal Map", src_node(bump.inputs["Normal"]).bl_idname == "ShaderNodeNormalMap")
+    check("Bump.Height <- bump image", src_node(bump.inputs["Height"]).bl_idname == "ShaderNodeTexImage")
+
+
+def test_udim():
+    print("\n[UDIM]")
+    folder = make_set("udim", ["Hero_BaseColor.1001.png", "Hero_BaseColor.1002.png",
+                               "Hero_Normal.1001.png", "Hero_Normal.1002.png"])
+    obj = new_cube("UdimCube", (9, 0, 0))
+    select_only(obj)
+    res = load(folder)
+    check("load udim finished", res == {"FINISHED"}, res)
+    nt = obj.active_material.node_tree
+    img_node = src_node(principled(nt).inputs["Base Color"])
+    img = img_node.image if img_node else None
+    check("base colour image is TILED", img is not None and img.source == "TILED",
+          img.source if img else None)
+    check("tiles 1001+1002", img is not None and sorted(t.number for t in img.tiles) == [1001, 1002],
+          [t.number for t in img.tiles] if img else None)
+    check("UDIM filepath token", img is not None and "<UDIM>" in img.filepath, img.filepath if img else None)
+    n_images = len(bpy.data.images)
+    bpy.ops.texture_plugger.apply()
+    check("UDIM re-apply reuses tiled image", len(bpy.data.images) == n_images)
+
+
+def test_multi_object():
+    print("\n[multi-object, material modes]")
+    folder = make_set("multi", ["Tile_Color.png", "Tile_Roughness.png"])
+    a = new_cube("MultiA", (0, 4, 0))
+    b = new_cube("MultiB", (2, 4, 0))
+    c = new_cube("MultiC", (4, 4, 0))
+    mat_c = bpy.data.materials.new("OwnMatC")
+    c.data.materials.append(mat_c)
+    select_only(a, b, c)
+    s = settings()
+    s.apply_to = "SELECTED"
+    s.material_mode = "ACTIVE_SLOT"
+    load(folder)
+    check("A and B share one new material", a.active_material is not None
+          and a.active_material == b.active_material)
+    check("C keeps its own material", c.active_material == mat_c)
+    for o in (a, b, c):
+        bsdf = principled(o.active_material.node_tree)
+        check(f"{o.name} Base Color linked", bsdf.inputs["Base Color"].is_linked)
+    n_mats = len(bpy.data.materials)
+    bpy.ops.texture_plugger.apply()
+    check("re-apply on selection: no new materials", len(bpy.data.materials) == n_mats)
+
+    # NEW material mode: never edits a foreign material, idempotent per set
+    d = new_cube("MultiD", (6, 4, 0))
+    e = new_cube("MultiE", (8, 4, 0))
+    foreign = bpy.data.materials.new("ForeignMat")
+    if foreign.node_tree is None:  # Blender < 5.0
+        foreign.use_nodes = True
+    d.data.materials.append(foreign)
+    e.data.materials.append(foreign)
+    foreign_nodes = len(foreign.node_tree.nodes)
+    select_only(d, e)
+    s.material_mode = "NEW"
+    bpy.ops.texture_plugger.apply()
+    new_mat = d.active_material
+    check("NEW mode replaced foreign material in the slot", new_mat != foreign)
+    check("NEW mode material named after set", new_mat.name.startswith("Tile"), new_mat.name)
+    check("NEW mode: one new material shared by the selection", e.active_material == new_mat)
+    check("NEW mode: foreign material untouched",
+          len(foreign.node_tree.nodes) == foreign_nodes and not tagged(foreign.node_tree))
+    n_after_first_new = len(bpy.data.materials)
+    bpy.ops.texture_plugger.apply()
+    check("NEW mode re-apply reuses material", len(bpy.data.materials) == n_after_first_new
+          and d.active_material == new_mat)
+    res = bpy.ops.texture_plugger.clear()
+    check("clear on selection", res == {"FINISHED"} and not tagged(new_mat.node_tree))
+    s.material_mode = "ACTIVE_SLOT"
+    s.apply_to = "ACTIVE"
+
+
+def test_box_projection_and_options():
+    print("\n[box projection, height as bump, base alpha]")
+    folder = make_set("box", ["Leaf_Albedo.png", "Leaf_Height.png"])
+    obj = new_cube("BoxCube", (0, 8, 0))
+    select_only(obj)
+    s = settings()
+    s.projection = "BOX"
+    s.height_mode = "BUMP"
+    s.use_base_alpha = True
+    s.texture_scale = 2.0
+    load(folder)
+    nt = obj.active_material.node_tree
+    imgs = [n for n in tagged(nt) if n.bl_idname == "ShaderNodeTexImage"]
+    check("images use BOX projection", imgs and all(i.projection == "BOX" for i in imgs))
+    mapping = by_role(nt, "mapping")[0]
+    check("box uses Object coordinates", src_sock(mapping.inputs["Vector"]).name == "Object")
+    check("mapping scale applied", abs(mapping.inputs["Scale"].default_value[0] - 2.0) < 1e-6)
+    bsdf = principled(nt)
+    check("height used as bump", src_node(bsdf.inputs["Normal"]).bl_idname == "ShaderNodeBump")
+    out = [n for n in nt.nodes if n.bl_idname == "ShaderNodeOutputMaterial"][0]
+    check("no displacement link in bump mode", not out.inputs["Displacement"].is_linked)
+    check("base colour alpha -> Alpha", src_sock(bsdf.inputs["Alpha"]).name == "Alpha")
+    s.projection = "UV"
+    s.height_mode = "DISPLACEMENT"
+    s.use_base_alpha = False
+    s.texture_scale = 1.0
+
+
+def test_manual_slots_and_robustness(module):
+    print("\n[manual slots, robustness]")
+    folder = make_set("manual", ["mystery_a.png", "mystery_b.png"])
+    obj = new_cube("ManualCube", (0, 12, 0))
+    select_only(obj)
+    res = load(folder)
+    s = settings()
+    check("unrecognised files listed as unassigned", len(s.slots) == 2
+          and all(sl.map_type == "NONE" for sl in s.slots), [sl.map_type for sl in s.slots])
+    s.slots[0].map_type = "base_color"
+    s.slots[0].enabled = True
+    s.slots[1].map_type = "roughness"
+    s.slots[1].enabled = True
+    res = bpy.ops.texture_plugger.apply()
+    check("manual assignment applied", res == {"FINISHED"}
+          and principled(obj.active_material.node_tree).inputs["Roughness"].is_linked)
+    # Slot clear removes the link on next apply
+    bpy.ops.texture_plugger.slot_clear(index=1)
+    bpy.ops.texture_plugger.apply()
+    check("cleared slot no longer linked",
+          not principled(obj.active_material.node_tree).inputs["Roughness"].is_linked)
+    # Browse sets path + auto-detects type for unassigned slot
+    rough_path = make_image(folder, "mystery_Roughness.png")
+    bpy.ops.texture_plugger.slot_add(map_type="metallic")
+    check("slot_add appended", s.slots[-1].map_type == "metallic")
+    s.slots[-1].map_type = "NONE"
+    bpy.ops.texture_plugger.slot_browse(index=len(s.slots) - 1, filepath=rough_path)
+    check("slot_browse auto-detects type", s.slots[-1].map_type == "roughness", s.slots[-1].map_type)
+    bpy.ops.texture_plugger.slot_remove()
+
+    # Missing file -> warning, not a traceback
+    s.slots[0].filepath = os.path.join(folder, "does_not_exist.png")
+    try:
+        res = bpy.ops.texture_plugger.apply()
+        check("missing file handled without exception", res in ({"CANCELLED"}, {"FINISHED"}), res)
+    except Exception as ex:
+        check("missing file handled without exception", False, ex)
+
+    # No active object
+    bpy.context.view_layer.objects.active = None
+    for o in bpy.context.view_layer.objects:
+        o.select_set(False)
+    try:
+        res = bpy.ops.texture_plugger.apply()
+        check("no active object -> CANCELLED, no exception", res == {"CANCELLED"}, res)
+    except Exception as ex:
+        check("no active object -> CANCELLED, no exception", False, ex)
+
+    # Non-material object (camera/light)
+    cam = bpy.data.objects.get("Camera")
+    select_only(cam)
+    s.slots[0].filepath = os.path.join(folder, "mystery_a.png")
+    try:
+        res = bpy.ops.texture_plugger.apply()
+        check("camera target -> CANCELLED, no exception", res == {"CANCELLED"}, res)
+    except Exception as ex:
+        check("camera target -> CANCELLED, no exception", False, ex)
+
+    # Folder without images
+    empty = os.path.join(TMP, "empty")
+    os.makedirs(empty, exist_ok=True)
+    open(os.path.join(empty, "readme.txt"), "w").close()
+    try:
+        res = load(empty)
+        check("empty folder -> CANCELLED, no exception", res == {"CANCELLED"}, res)
+    except Exception as ex:
+        check("empty folder -> CANCELLED, no exception", False, ex)
+
+    # Relative paths on unsaved file: warns and falls back to absolute
+    obj = new_cube("RelCube", (0, 16, 0))
+    select_only(obj)
+    s.relative_paths = True
+    try:
+        res = load(make_set("rel", ["Rel_Color.png"]))
+        img = src_node(principled(obj.active_material.node_tree).inputs["Base Color"]).image
+        check("relative paths on unsaved file -> absolute + no exception",
+              res == {"FINISHED"} and os.path.isabs(img.filepath), img.filepath)
+    except Exception as ex:
+        check("relative paths on unsaved file -> absolute + no exception", False, ex)
+    # Saved file -> relative
+    blend = os.path.join(TMP, "rel_test.blend")
+    bpy.ops.wm.save_as_mainfile(filepath=blend)
+    bpy.ops.texture_plugger.apply()
+    img = src_node(principled(obj.active_material.node_tree).inputs["Base Color"]).image
+    check("relative path after save", img.filepath.startswith("//"), img.filepath)
+    s.relative_paths = False
+
+    # Custom keywords from preferences
+    prefs = bpy.context.preferences.addons[module].preferences
+    prefs.kw_base_color = "farbe"
+    folder = make_set("custom_kw", ["Stein_Farbe.png", "Stein_Albedo.png"])
+    obj = new_cube("KwCube", (0, 20, 0))
+    select_only(obj)
+    load(folder, apply=False)
+    types = {os.path.basename(sl.filepath): sl.map_type for sl in s.slots}
+    check("custom keyword used", types.get("Stein_Farbe.png") == "base_color", types)
+    check("removed keyword no longer matches", types.get("Stein_Albedo.png") in (None, "NONE"), types)
+    bpy.ops.texture_plugger.reset_keywords()
+    check("reset keywords", "albedo" in prefs.kw_base_color)
+
+
+def test_multiple_sets():
+    print("\n[multiple sets in one folder]")
+    folder = make_set("sets", ["Bricks01_Color.png", "Bricks01_Roughness.png",
+                               "Wood02_Color.png", "Wood02_Roughness.png", "Wood02_NormalGL.png"])
+    obj = new_cube("SetsCube", (0, 24, 0))
+    select_only(obj)
+    load(folder, apply=False)
+    s = settings()
+    check("two sets offered", len(s.sets) == 2, [x.name for x in s.sets])
+    check("largest set chosen", s.set_key == "wood_02", s.set_key)
+    s.active_set = "bricks_01"
+    check("switching set repopulates slots", s.set_key == "bricks_01"
+          and all("Bricks01" in os.path.basename(sl.filepath) for sl in s.slots),
+          [sl.filepath for sl in s.slots])
+
+
+class _FakeOp:
+    def __setattr__(self, k, v):
+        object.__setattr__(self, k, v)
+
+
+class FakeLayout:
+    """Records layout calls and validates property / operator names."""
+    errors = []
+
+    def __init__(self):
+        self.use_property_split = False
+        self.use_property_decorate = False
+        self.scale_y = 1.0
+        self.active = True
+        self.enabled = True
+
+    def _child(self, *a, **k):
+        return FakeLayout()
+
+    column = row = box = grid_flow = split = _child
+
+    def label(self, **k):
+        pass
+
+    def separator(self, **k):
+        pass
+
+    def prop(self, data, name, **k):
+        if name not in data.bl_rna.properties:
+            FakeLayout.errors.append(f"missing property {type(data).__name__}.{name}")
+
+    def operator(self, idname, **k):
+        mod, _, op = idname.partition(".")
+        if not hasattr(getattr(bpy.ops, mod), op):
+            FakeLayout.errors.append(f"missing operator {idname}")
+        return _FakeOp()
+
+    def template_list(self, list_type, list_id, data, prop, active_data, active_prop, **k):
+        if not hasattr(bpy.types, list_type):
+            FakeLayout.errors.append(f"missing UIList {list_type}")
+        for d, p in ((data, prop), (active_data, active_prop)):
+            if p not in d.bl_rna.properties:
+                FakeLayout.errors.append(f"missing property {p}")
+
+
+def test_ui_draw(module):
+    print("\n[UI draw smoke test with stub layout]")
+    import importlib
+    pkg = importlib.import_module(module)
+    ui, prefs_mod = pkg.ui, pkg.prefs
+
+    class P:
+        pass
+
+    FakeLayout.errors = []
+    obj = new_cube("UiCube", (0, 30, 0))
+    select_only(obj)
+    load(make_set("ui", ["Ui_Color.png", "Ui_Roughness.png", "Other_Color.png",
+                         "Other_Roughness.png", "Other_Normal.png"]), apply=False)
+    s = settings()
+    for projection, height in (("UV", "DISPLACEMENT"), ("BOX", "BUMP")):
+        s.projection, s.height_mode = projection, height
+        p = P()
+        p.layout = FakeLayout()
+        try:
+            ui._draw_main(p, bpy.context)
+            ui._draw_options(p, bpy.context)
+        except Exception as ex:
+            FakeLayout.errors.append(f"draw raised {ex!r}")
+    s.projection, s.height_mode = "UV", "DISPLACEMENT"
+    # UIList row
+    try:
+        ui.TEXTUREPLUGGER_UL_slots.draw_item(None, bpy.context, FakeLayout(), s, s.slots[0],
+                                             0, s, "slot_index", 0)
+    except Exception as ex:
+        FakeLayout.errors.append(f"UIList draw raised {ex!r}")
+    # Preferences
+    prefs = bpy.context.preferences.addons[module].preferences
+    prefs.show_keywords = True
+    try:
+        # Call draw with a proxy whose layout is fake but properties come from prefs.
+        class Proxy:
+            def __init__(self, real):
+                object.__setattr__(self, "_real", real)
+                object.__setattr__(self, "layout", FakeLayout())
+
+            def __getattr__(self, k):
+                return getattr(self._real, k)
+
+            @property
+            def bl_rna(self):
+                return self._real.bl_rna
+        proxy = Proxy(prefs)
+        prefs_mod.TexturePluggerPreferences.draw(proxy, bpy.context)
+    except Exception as ex:
+        FakeLayout.errors.append(f"prefs draw raised {ex!r}")
+    prefs.show_keywords = False
+    check("panels/list/prefs draw without errors", not FakeLayout.errors, FakeLayout.errors)
+
+
+def test_disable_enable(module):
+    print("\n[disable / re-enable]")
+    try:
+        bpy.ops.preferences.addon_disable(module=module)
+        check("disabled cleanly", not hasattr(bpy.types, "TEXTUREPLUGGER_PT_view3d"))
+        bpy.ops.preferences.addon_enable(module=module)
+        check("re-enabled", hasattr(bpy.types, "TEXTUREPLUGGER_PT_view3d"))
+    except Exception as ex:
+        check("disable/enable without exception", False, ex)
+
+
+def main():
+    print(f"Blender {bpy.app.version_string}  mode={'legacy' if '--legacy' in ARGS else 'extension'}")
+    try:
+        module = install()
+        test_registration(module)
+        test_basic_set()
+        test_packed_dx_gloss()
+        test_udim()
+        test_multi_object()
+        test_box_projection_and_options()
+        test_multiple_sets()
+        test_manual_slots_and_robustness(module)
+        test_ui_draw(module)
+        test_disable_enable(module)
+    except Exception:
+        traceback.print_exc()
+        check("test run completed without exception", False, "see traceback")
+    finally:
+        shutil.rmtree(TMP, ignore_errors=True)
+    passed = sum(1 for r in RESULTS if r[1])
+    failed = [r for r in RESULTS if not r[1]]
+    print(f"\nRESULT: {passed} passed, {len(failed)} failed (Blender {bpy.app.version_string})")
+    for name, _, detail in failed:
+        print(f"  FAILED: {name}: {detail}")
+    sys.stdout.flush()
+    if failed:
+        sys.exit(1)
+
+
+main()
