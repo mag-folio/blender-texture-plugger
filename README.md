@@ -5,6 +5,41 @@ Principled BSDF material. It detects each map from its filename and wires everyt
 (colour spaces, normal/bump/displacement, packed maps). Run it again and you get the same
 result, never duplicated nodes. Pure Python with no dependencies. It makes no network calls.
 
+![A stone floor and two painted metal crates, textured in one go by Texture Plugger](docs/images/render_after.jpg)
+
+| Before | After loading two texture folders |
+|---|---|
+| ![The same scene with no materials](docs/images/render_before.jpg) | ![The scene after Texture Plugger built both materials](docs/images/render_after.jpg) |
+
+## What it looks like
+
+**1. A folder of maps.** Texture Plugger reads each filename and works out which map it is.
+Both naming styles below are detected without any setup: Poly Haven style suffixes
+(`_diff`, `_nor_gl`, `_disp`...) and Unreal style ones, including a packed ORM map and a
+DirectX normal map.
+
+![Two texture sets and the map type detected for each file](docs/images/texture_folder.png)
+
+**2. The panel.** Press **Load Texture Set** and pick the folder (or drag the images in).
+Each detected map gets a row you can switch off, re-type or swap. The folder holds two
+sets, so the *Set* menu lets you choose; the one with the most maps is picked first.
+
+![The Texture Plugger sidebar panel in the 3D Viewport](docs/images/panel.png)
+
+**3. The node tree it builds.** Everything lands in one labelled frame with a fixed
+layout. The stone set gets AO multiplied into Base Color, an OpenGL normal map and real
+displacement:
+
+![Node tree built for the stone_tiles set](docs/images/nodes_stone.png)
+
+The metal set's DirectX normal map has its green channel flipped, and the packed ORM map is
+split into AO, Roughness and Metallic:
+
+![Node tree built for the T_PaintedMetal set](docs/images/nodes_metal.png)
+
+The example textures were generated procedurally just for these screenshots. The renders
+are Cycles; the panel screenshot is Blender 5.0's Material Preview.
+
 ## Install
 
 1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-1.0.0.zip`.
