@@ -26,7 +26,7 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 LINK_FILE = "blender_link.json"
 LINK_DIR_NAME = "texture_plugger_link"
 FRAME_MARGIN = 1.15
@@ -378,11 +378,15 @@ class Bridge:
 
     def _tick(self):
         try:
+            before = (self.data or {}).get("environment")
             changed = self.reload_link()
             if not self.project_ready():
                 return
             if changed and self.auto_light:
-                self.apply_lighting()
+                if (self.data or {}).get("environment") != before:
+                    self.apply_lighting(self.sent_set())     # new lighting: the object just sent
+                else:                                        # e.g. a view-only send: stay on
+                    self.apply_lighting()                    # the set being worked on
             names = tuple(self.texture_set_names())
             if names != self.last_set_names:      # mesh reimported / sets added
                 self.last_set_names = names
@@ -400,6 +404,17 @@ class Bridge:
             self.log(f"error: {ex}", warn=True)
 
     # --------------------------------------------------------------- lighting
+    def sent_set(self):
+        """Painter name of the texture set Blender last sent (the one its lighting
+        was baked around), or None."""
+        want = (self.data or {}).get("active")
+        if not want:
+            return None
+        for painter_name, key in match_sets(self.texture_set_names(), self.sets()).items():
+            if key == want:
+                return painter_name
+        return None
+
     def environment_for(self, set_name):
         d = self.data or {}
         info = self.set_info(set_name)
@@ -418,6 +433,7 @@ class Bridge:
         if not name:
             return False
         if name == self.applied_env and not force:
+            self.apply_tone_mapping()      # tone mapping may change on its own
             return True
         path = os.path.join(self.link_dir, name)
         if not os.path.isfile(path):
@@ -437,6 +453,7 @@ class Bridge:
             url = res.identifier().url()
             self.env_cache[path] = url
         dp.set_environment_resource(rs.ResourceID.from_url(url))
+        self.apply_tone_mapping()
         self.applied_env = name
         owner = next((n for n, i in self.sets().items()
                       if isinstance(i, dict) and i.get("environment") == name), None)
@@ -569,11 +586,13 @@ class Bridge:
         self.env_cache.clear()
         self.applied_env = None
         self.soloing = False
-        self.last_active_set = None
+        # already "seen": the first tick must not swap to the first set's lighting
+        self.last_active_set = self.active_set_name()
         self.reload_link(force=True)
         if self.auto_light:
             try:
-                self.apply_lighting()
+                # Painter opens on its first texture set; light the one Blender sent
+                self.apply_lighting(self.sent_set())
             except Exception as ex:
                 self.log(f"could not apply lighting: {ex}", warn=True)
         self.refresh_ui()
@@ -585,6 +604,25 @@ class Bridge:
             except Exception as ex:
                 self.log(f"scene setup failed: {ex}", warn=True)
         QtCore.QTimer.singleShot(1500, setup)      # let Painter finish loading the mesh
+
+    def apply_tone_mapping(self):
+        """Use the Painter tone mapping that matches Blender's view transform.
+
+        Blender's AgX/Filmic roll bright light off; Painter's default "Linear" clips
+        it, so a room lit by strong lamps would look blown out. Not available in
+        colour-managed (OCIO/ACEScg) projects, which handle this themselves.
+        """
+        import substance_painter.display as dp
+        want = (self.data or {}).get("tone_mapping")
+        if not want:
+            return False
+        try:
+            fn = getattr(dp.ToneMappingFunction, str(want))
+            if dp.get_tone_mapping() != fn:
+                dp.set_tone_mapping(fn)
+            return True
+        except Exception:      # e.g. colour-managed projects: never break the lighting
+            return False
 
     def apply_scene_setup(self):
         """New whole-scene project from Blender: size its texture sets and save it.

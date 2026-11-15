@@ -80,6 +80,20 @@ class Contract(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_tone_mapping_matches_blender_view_transform(self):
+        self.assertEqual(pl.tone_mapping_for("AgX"), "ACES")
+        self.assertEqual(pl.tone_mapping_for("Filmic"), "ACES")
+        self.assertEqual(pl.tone_mapping_for("Khronos PBR Neutral"), "ACES")
+        self.assertEqual(pl.tone_mapping_for("Standard"), "Linear")
+        self.assertEqual(pl.tone_mapping_for(None), "Linear")
+        d = tempfile.mkdtemp(prefix="tp_link_")
+        try:
+            pl.write_link(d, {}, tone_mapping="ACES")
+            data = pl.read_link(pl.write_link(d, {}))             # a later send keeps it
+            self.assertEqual(data["tone_mapping"], "ACES")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_broken_link_file_is_ignored(self):
         d = tempfile.mkdtemp(prefix="tp_link_")
         try:
@@ -124,6 +138,31 @@ class LinkFile(unittest.TestCase):
         self.assertEqual(data["sets"]["B"]["environment"], "env_b.exr")
         self.assertEqual(data["environment"], "env_b.exr")
         self.assertEqual(pl.referenced_environments(data), {"env_a.exr", "env_b.exr"})
+
+    def test_same_lighting_keeps_each_sets_own_map(self):
+        two = {"A": self.box("a"), "B": self.box("b")}
+        pl.write_link(self.d, two, active="A", environment="env_a.exr", lighting_key="k1")
+        data = pl.read_link(pl.write_link(self.d, two, active="B", environment="env_b.exr",
+                                          lighting_key="k1"))
+        self.assertEqual(data["sets"]["A"]["environment"], "env_a.exr")
+        self.assertEqual(data["sets"]["B"]["environment"], "env_b.exr")
+
+    def test_changed_lighting_drops_old_maps(self):
+        two = {"A": self.box("a"), "B": self.box("b")}
+        pl.write_link(self.d, two, active="A", environment="env_a.exr", lighting_key="k1")
+        path = pl.write_link(self.d, two, active="B", environment="env_b.exr", lighting_key="k2")
+        data = pl.read_link(path)
+        self.assertNotIn("environment", data["sets"]["A"])       # falls back to the new map
+        self.assertEqual(data["sets"]["B"]["environment"], "env_b.exr")
+        self.assertEqual(data["environment"], "env_b.exr")
+        self.assertEqual(pl.referenced_environments(data), {"env_b.exr"})
+
+    def test_view_only_send_keeps_lighting_key(self):
+        pl.write_link(self.d, {"A": self.box("a")}, active="A", environment="env_a.exr",
+                      lighting_key="k1")
+        data = pl.read_link(pl.write_link(self.d, {"A": self.box("a")}, active="A"))
+        self.assertEqual(data["sets"]["A"]["lighting_key"], "k1")
+        self.assertEqual(data["sets"]["A"]["environment"], "env_a.exr")
 
     def test_removed_sets_are_dropped(self):
         pl.write_link(self.d, {"A": self.box("a"), "B": self.box("b")})

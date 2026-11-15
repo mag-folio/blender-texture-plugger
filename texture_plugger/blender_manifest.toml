@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "texture_plugger"
-version = "1.2.0"
+version = "1.2.1"
 name = "Texture Plugger"
 tagline = "Detect PBR texture maps by filename and wire up the material"
 maintainer = "Texture Plugger contributors"

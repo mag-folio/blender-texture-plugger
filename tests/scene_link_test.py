@@ -195,6 +195,165 @@ def test(mod):
         check("plugin install idempotent", not changed2)
     finally:
         sl.plugin_install_path = orig
+    enclosed(mod)
+    occluders(mod)
+    fingerprint(mod)
+
+
+def _env_mean(path):
+    img = bpy.data.images.load(path)
+    try:
+        px = np.empty(img.size[0] * img.size[1] * 4, np.float32)
+        img.pixels.foreach_get(px)
+    finally:
+        bpy.data.images.remove(img)
+    return float(px.reshape(-1, 4)[:, :3].mean())
+
+
+def _sun(name, rot, energy=3.0):
+    sun = bpy.data.lights.new(name, "SUN")
+    sun.energy = energy
+    so = bpy.data.objects.new(name, sun)
+    bpy.context.scene.collection.objects.link(so)
+    so.rotation_euler = rot
+    return so
+
+
+def enclosed(mod):
+    """A small part in a nook: measured at its centre while light reaches it,
+    moved to the nearest clear spot only when no lamp does."""
+    sl = mod.scene_link
+    for ob in list(bpy.data.objects):
+        bpy.data.objects.remove(ob, do_unlink=True)
+    sc = bpy.context.scene
+    sc.world.node_tree.nodes["Background"].inputs[1].default_value = 0.2
+    screw = cube("Screw", (0, 0, 0), 0.04, "Screw")
+    # a 30 cm box open at the top (five walls)
+    for i, (loc, scale) in enumerate((((0, 0, -0.15), (0.16, 0.16, 0.01)),
+                                      ((0.15, 0, 0), (0.01, 0.16, 0.16)), ((-0.15, 0, 0), (0.01, 0.16, 0.16)),
+                                      ((0, 0.15, 0), (0.16, 0.01, 0.16)), ((0, -0.15, 0), (0.16, 0.01, 0.16)))):
+        wall = cube(f"Wall{i}", loc, 2.0, f"Wall{i}")
+        wall.scale = scale
+    bpy.context.view_layer.update()
+    dg = bpy.context.evaluated_depsgraph_get()
+    centre, radius, _ = sl.world_bounds(screw, dg)
+    check("part in a nook counts as boxed in", sl.boxed_in(bpy.context, screw, dg, centre, radius))
+
+    # sun from high up shines into the nook: keep the centre
+    high = _sun("SunHigh", (0.3, 0.4, 0.0))
+    info = sl.bake_environment(bpy.context, screw, os.path.join(TMP, "nook_lit.exr"), 128, 4, 2.0, True)
+    check("lit nook is measured at the part itself", not info["moved"] and info["lights"] == 1, info)
+    bpy.data.objects.remove(high, do_unlink=True)
+
+    # low sun hits the walls: at the centre no lamp reaches, so move out of the nook
+    _sun("SunLow", (1.45, 0.0, 0.0))
+    bpy.context.view_layer.update()
+    out = os.path.join(TMP, "nook_dark.exr")
+    info = sl.bake_environment(bpy.context, screw, out, 128, 4, 2.0, True)
+    mean = _env_mean(out)
+    check("dark nook moves to a clear spot that the sun reaches",
+          info["moved"] and info["lights"] == 1 and mean > 0.05, (info, mean))
+
+    # an object out in the open, or resting on a floor, is never boxed in
+    free = cube("Free", (3, 0, 0), 0.5, "Free")
+    floor = cube("Floor", (-3, 0, -0.26), 2.0, "Floor")
+    floor.scale = (1.0, 1.0, 0.01)
+    mug = cube("Mug", (-3, 0, 0), 0.5, "Mug")
+    bpy.context.view_layer.update()
+    dg = bpy.context.evaluated_depsgraph_get()
+    for ob in (free, mug):
+        c2, r2, _ = sl.world_bounds(ob, dg)
+        check(f"{ob.name}: not boxed in", not sl.boxed_in(bpy.context, ob, dg, c2, r2))
+
+
+def occluders(mod):
+    """Shadows in the lamp measurement match a render: glass lets the sun in,
+    and walls hidden only in the viewport still cast shadows."""
+    sl = mod.scene_link
+    for ob in list(bpy.data.objects):
+        bpy.data.objects.remove(ob, do_unlink=True)
+    sc = bpy.context.scene
+    target = cube("Target", (0, 0, 0), 0.2, "Target")
+    _sun("SunTop", (0.0, 0.0, 0.0))              # straight down
+    pane = cube("Window", (0, 0, 1.0), 2.0, "WindowGlass")
+    pane.scale = (1.0, 1.0, 0.01)
+    m = pane.active_material
+    m.use_nodes = True
+    nt = m.node_tree
+    nt.nodes.clear()
+    tr = nt.nodes.new("ShaderNodeBsdfTransparent")
+    o = nt.nodes.new("ShaderNodeOutputMaterial")
+    nt.links.new(tr.outputs[0], o.inputs[0])
+    bpy.context.view_layer.update()
+    dg = bpy.context.evaluated_depsgraph_get()
+    c, r, _ = sl.world_bounds(target, dg)
+    got = sl.measure_lights(sc, bpy.context.view_layer, target, c, r, samples=4)
+    check("sun through a clear window is measured", len(got) == 1 and max(got[0][3]) > 1.0, got)
+
+    roof = cube("Roof", (0, 0, 1.5), 2.0, "Roof")
+    roof.scale = (1.0, 1.0, 0.01)
+    roof.hide_set(True)                          # hidden in the viewport, still renders
+    bpy.context.view_layer.update()
+    got = sl.measure_lights(sc, bpy.context.view_layer, target, c, r, samples=4)
+    check("roof hidden only in the viewport still shades", not got, got)
+    roof.hide_render = True
+    got = sl.measure_lights(sc, bpy.context.view_layer, target, c, r, samples=4)
+    check("roof off for rendering lets the sun in", len(got) == 1, got)
+
+    # a real glass pane (refractive) shades the sun, exactly as a Cycles render does
+    roof.hide_render = False
+    roof.hide_set(False)
+    bpy.data.objects.remove(roof, do_unlink=True)
+    nt.nodes.clear()
+    gl = nt.nodes.new("ShaderNodeBsdfGlass")
+    o = nt.nodes.new("ShaderNodeOutputMaterial")
+    nt.links.new(gl.outputs[0], o.inputs[0])
+    got = sl.measure_lights(sc, bpy.context.view_layer, target, c, r, samples=4)
+    print("  INFO  sun through refractive glass:", got and [round(x, 3) for x in got[0][3]])
+
+    # a glowing panel next to the target must not make a blocked lamp count
+    nt.nodes.clear()
+    o = nt.nodes.new("ShaderNodeOutputMaterial")
+    df = nt.nodes.new("ShaderNodeBsdfDiffuse")
+    nt.links.new(df.outputs[0], o.inputs[0])                # the pane is opaque now
+    glow = cube("Glow", (0.4, 0, 0.3), 0.3, "Glow")
+    gm = glow.active_material
+    gm.use_nodes = True
+    gm.node_tree.nodes.clear()
+    em = gm.node_tree.nodes.new("ShaderNodeEmission")
+    em.inputs["Strength"].default_value = 20.0
+    go = gm.node_tree.nodes.new("ShaderNodeOutputMaterial")
+    gm.node_tree.links.new(em.outputs[0], go.inputs[0])
+    bpy.context.view_layer.update()
+    got = sl.measure_lights(sc, bpy.context.view_layer, target, c, r, samples=4)
+    check("glowing mesh does not turn a blocked lamp on", not got, got)
+
+
+def fingerprint(mod):
+    """The lighting key changes with the lighting and only with it."""
+    sl = mod.scene_link
+    ctx = bpy.context
+    sc = ctx.scene
+    w = sc.world
+    sky = w.node_tree.nodes.new("ShaderNodeTexSky")
+    w.node_tree.links.new(sky.outputs[0], w.node_tree.nodes["Background"].inputs[0])
+    lamp = next(o for o in sc.objects if o.type == "LIGHT")
+    k1 = sl.lighting_key(ctx)
+    check("lighting key is stable", sl.lighting_key(ctx) == k1)
+    sc.objects["Target"].location.x += 1.0
+    ctx.view_layer.update()
+    check("moving a non-lamp object keeps the key", sl.lighting_key(ctx) == k1)
+    if hasattr(sky, "sun_elevation"):
+        sky.sun_elevation += 0.2
+        k2 = sl.lighting_key(ctx)
+        check("sky sun elevation changes the key", k2 != k1)
+        k1 = k2
+    lamp.rotation_euler.x += 0.3
+    ctx.view_layer.update()
+    k3 = sl.lighting_key(ctx)
+    check("turning a lamp changes the key", k3 != k1)
+    lamp.data.energy *= 2
+    check("lamp strength changes the key", sl.lighting_key(ctx) != k3)
 
 
 def main():

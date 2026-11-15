@@ -42,7 +42,7 @@ are Cycles; the panel screenshot is Blender 5.0's Material Preview.
 
 ## Install
 
-1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-1.2.0.zip`.
+1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-1.2.1.zip`.
 2. In Blender go to **Edit > Preferences > Get Extensions**, open the **v** menu (top right),
    choose **Install from Disk...** and pick the zip.
 3. Check that **Texture Plugger** is enabled.

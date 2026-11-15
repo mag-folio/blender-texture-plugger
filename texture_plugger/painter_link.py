@@ -200,6 +200,17 @@ def view_payload(cam_pos, forward, up, fov_h, fov_v, ortho=False, ortho_height=0
 # Link file
 # --------------------------------------------------------------------------
 
+def tone_mapping_for(view_transform):
+    """Painter tone mapping closest to a Blender view transform.
+
+    Painter has "Linear" (clips above 1, like Blender's Standard) and "ACES" (rolls
+    bright light off smoothly, like AgX, Filmic or Khronos PBR Neutral). With Linear,
+    a room lit by strong lamps looks blown out in Painter although it looks right in
+    Blender.
+    """
+    return "Linear" if str(view_transform or "") in {"Standard", "Raw", ""} else "ACES"
+
+
 def link_file(link_dir):
     return os.path.join(link_dir, LINK_FILE)
 
@@ -214,7 +225,8 @@ def read_link(path):
 
 
 def write_link(link_dir, sets, active="", environment=None, exposure=0.0, view=None,
-               blend_name="", replace_sets=True, scene=None):
+               blend_name="", replace_sets=True, scene=None, tone_mapping=None,
+               lighting_key=None):
     """Merge new data into the link file (atomic write). Returns its path.
 
     ``sets`` maps a texture set (material) name to
@@ -222,6 +234,11 @@ def write_link(link_dir, sets, active="", environment=None, exposure=0.0, view=N
     Blender units.  ``environment`` (a file name inside ``link_dir``) is stored
     for ``active`` and as the scene-wide default.  Keys not passed keep their
     previous values, so sending the view alone keeps the lighting.
+
+    ``lighting_key`` fingerprints the world and lamps the new environment was
+    baked with.  Other sets keep their own baked environment only while it was
+    baked under the same lighting; after a lamp moves they fall back to the new
+    map instead of showing the old lighting.
     """
     os.makedirs(link_dir, exist_ok=True)
     path = link_file(link_dir)
@@ -236,6 +253,8 @@ def write_link(link_dir, sets, active="", environment=None, exposure=0.0, view=N
         if prev.get("environment"):                    # keep per-set lighting
             entry.setdefault("environment", prev["environment"])
             entry.setdefault("exposure", prev.get("exposure", 0.0))
+            if prev.get("lighting_key"):
+                entry.setdefault("lighting_key", prev["lighting_key"])
         new_sets[name] = entry
     if not replace_sets:
         for name, prev in old_sets.items():
@@ -249,11 +268,21 @@ def write_link(link_dir, sets, active="", environment=None, exposure=0.0, view=N
     if environment is not None:
         data["environment"] = environment
         data["exposure"] = float(exposure)
+        if lighting_key:
+            data["lighting_key"] = lighting_key
+            for entry in new_sets.values():                # baked under other lighting
+                if entry.get("environment") and entry.get("lighting_key") != lighting_key:
+                    for k in ("environment", "exposure", "lighting_key"):
+                        entry.pop(k, None)
         if active and active in new_sets:
             new_sets[active]["environment"] = environment
             new_sets[active]["exposure"] = float(exposure)
+            if lighting_key:
+                new_sets[active]["lighting_key"] = lighting_key
     if view is not None:
         data["view"] = view
+    if tone_mapping:
+        data["tone_mapping"] = tone_mapping
     # Whole-scene launch: texture size for new texture sets and where to save the
     # Painter project (one per part). Only meant for the launch that sent it.
     if scene:
