@@ -42,7 +42,7 @@ are Cycles; the panel screenshot is Blender 5.0's Material Preview.
 
 ## Install
 
-1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-1.0.0.zip`.
+1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-1.1.0.zip`.
 2. In Blender go to **Edit > Preferences > Get Extensions**, open the **v** menu (top right),
    choose **Install from Disk...** and pick the zip.
 3. Check that **Texture Plugger** is enabled.
@@ -87,6 +87,68 @@ The same zip also installs as a legacy add-on (**Add-ons > Install from Disk**).
   - **Base Color Alpha as Opacity**
   - **Emission strength**
   - **Relative paths**
+
+## Create & Paint (Substance 3D Painter)
+
+Use this when you want to paint the textures yourself in Adobe Substance 3D Painter and
+see the result in Blender. You need Painter installed. The add-on looks for it in the
+usual places; if it can't find it, set the path in the add-on preferences.
+
+1. Select your object. Open the **Create & Paint** sub-panel in the sidebar.
+2. Pick a **Folder**, tick the **maps** you want (Base Color, Normal, Metallic and
+   Roughness are on by default; Emission, Alpha and Displacement are optional) and choose
+   the placeholder **Size**.
+3. Press **Create Texture Set**. The name is the object's material name (or the *Name* you
+   typed). If the object has no material, one is created.
+4. Press **Edit in Substance Painter**. Painter starts with your mesh and an export folder
+   that is already set.
+5. Paint. When you want to see it in Blender, in Painter use **File > Export Textures**,
+   with the output template **Blender (Principled BSDF)** and the format **PNG**. Blender
+   updates the material a moment after the export finishes.
+
+Pressing **Ctrl+S** in Painter does not update Blender. It only saves the Painter project
+(a `.spp` file), not the images. Blender changes only when you export.
+
+Create Texture Set makes this layout inside the folder you picked:
+
+```
+<Folder>/
+  Crate/                      one folder per texture set, named after the material
+    textures/
+      Crate_BaseColor.png     flat colour placeholders, plugged into the material
+      Crate_Normal.png
+      Crate_Metallic.png
+      Crate_Roughness.png
+      (Crate_Emission.png, Crate_Alpha.png, Crate_Displacement.png if ticked)
+    mesh/
+      Crate.fbx               your object, exported for Painter
+```
+
+The file names are exactly the ones the "Blender (Principled BSDF)" export writes, so each
+export replaces a placeholder. Base Color is set up as sRGB and all the other maps as
+Non-Color. Because the add-on writes the textures, the material is wired up straight away.
+
+- **Save your project inside the set folder** (for example `Crate/Crate.spp`). The next time
+  you press **Edit in Substance Painter**, it reopens that project instead of starting a new
+  one. If there are several `.spp` files there, the newest one is used.
+- **Existing files are never overwritten.** Pressing Create Texture Set again only adds
+  missing files, and your painted textures stay as they are.
+- **Auto Reload** is on by default. It checks the texture files about once a second and
+  reloads any that changed on disk. Images with unsaved paint in Blender are never reloaded.
+  You can switch it off and change the interval, and set the **Painter path**, in
+  **Edit > Preferences > Add-ons > Texture Plugger**. The **Reload Textures** button in
+  the panel reloads everything right away. **Open Folder** shows the set folder.
+- **Undo can't break the link.** If you press Ctrl+Z past the point where the set was
+  created, the add-on puts the material, its textures and the folder link straight back
+  (the files on disk were never touched). To really disconnect a material from its set
+  folder, press **Unlink Texture Set** in the panel; it keeps the nodes and the files. Use
+  **Remove Textures** to take the nodes out.
+- **One texture set per material.** The buttons always work on the active material of the
+  active object. If an object has several materials, create one set per material by
+  switching the active material slot. A second material with the same name gets
+  `_2` (so `Crate_2`), because Painter names the set after the material.
+- Don't rename the material after creating the set: Painter would export files with the new
+  name and the placeholders would not be replaced (the add-on warns you).
 
 ## What gets built
 
@@ -138,6 +200,7 @@ edited in the add-on preferences, and there's a reset-to-defaults button.
 
 ```
 python tests\test_detection.py          # pure-Python detection tests (no Blender)
+python tests\test_scaffold.py           # pure-Python Create & Paint scaffolding tests (no Blender)
 .\tests\run_blender_tests.ps1           # headless Blender test (isolated user dir)
 .\tests\run_blender_tests.ps1 -Legacy   # same, loaded as a legacy add-on
 .\tests\run_blender_tests.ps1 -Script adversarial_test.py   # drop path, reload, linked data...
@@ -161,6 +224,11 @@ Blender preferences and extensions are never changed.
   are read-only: they are skipped with a message.
 - Images that the add-on's removed nodes leave unused are deleted on re-apply/Remove
   (unless they have a fake user or unsaved paint).
+- Create & Paint: Painter must export with the "Blender (Principled BSDF)" template as PNG.
+  With any other template the file names don't match and Blender won't pick them up.
+- Create & Paint: if you change the geometry in Blender after the project was started, the
+  mesh is not updated in Painter. Re-import the mesh in Painter (the add-on exports it again
+  to `mesh/` each time you press **Edit in Substance Painter** without a saved `.spp`).
 - The file browser and the drop menu need an interactive Blender. The headless tests
   call `wm.drop_import_file` and the import operator with `INVOKE_DEFAULT` the way Blender
   does, but they can't click the menu.

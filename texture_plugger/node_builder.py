@@ -26,6 +26,8 @@ TAG = "texture_plugger"
 CORE_TAG = "texture_plugger_core"
 ORIG_KEY = "texture_plugger_orig"
 SET_KEY = "texture_plugger_set"
+#: Image custom property: reload this image when its file changes on disk.
+WATCH_KEY = "texture_plugger_watch"
 
 MATERIAL_OBJECT_TYPES = {
     "MESH", "CURVE", "SURFACE", "META", "FONT", "CURVES", "POINTCLOUD", "VOLUME",
@@ -477,6 +479,10 @@ class _Builder:
                 self.result.warnings.append(warn)
             if img is None:
                 continue
+            try:
+                img[WATCH_KEY] = 1
+            except Exception:
+                pass
             ext = os.path.splitext(mi.path)[1]
             set_colorspace(img, "COLOR" if mt.color else "DATA", ext)
             if mt.packed:

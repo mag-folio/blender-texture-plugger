@@ -23,6 +23,8 @@ if ($Test) {
     $ErrorActionPreference = "Continue"
     & $python "$root\tests\test_detection.py" 2>&1 | ForEach-Object { "$_" }
     if ($LASTEXITCODE -ne 0) { throw "Detection tests failed" }
+    & $python "$root\tests\test_scaffold.py" 2>&1 | ForEach-Object { "$_" }
+    if ($LASTEXITCODE -ne 0) { throw "Scaffold tests failed" }
     $testArgs = @{}
     if ($Blender) { $testArgs["Blender"] = $Blender }
     & "$root\tests\run_blender_tests.ps1" @testArgs

@@ -2,7 +2,7 @@
 
   set BLENDER_USER_RESOURCES=<temp dir>
   blender --background --factory-startup --python-exit-code 1 \
-          --python tests/adversarial_test.py -- --zip dist/texture_plugger-1.0.0.zip
+          --python tests/adversarial_test.py -- --zip dist/texture_plugger-1.1.0.zip
 """
 
 import importlib

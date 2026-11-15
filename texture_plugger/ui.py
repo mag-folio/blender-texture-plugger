@@ -3,7 +3,7 @@
 
 import bpy
 
-from . import detection, node_builder
+from . import detection, node_builder, prefs, scaffold, workflow
 
 CATEGORY = "Texture Plugger"
 
@@ -127,6 +127,45 @@ def _draw_options(panel, context):
     layout.operator("texture_plugger.reset_options", icon="LOOP_BACK")
 
 
+def _draw_paint(panel, context):
+    layout = panel.layout
+    settings = getattr(context.scene, "texture_plugger", None)
+    if settings is None:
+        return
+    col = layout.column()
+    col.prop(settings, "create_root")
+    col.prop(settings, "create_name")
+    grid = col.grid_flow(columns=2, even_columns=True, align=True)
+    for spec in scaffold.MAPS:
+        grid.prop(settings, "create_" + spec.id)
+    col.prop(settings, "create_resolution")
+    sub = col.column()
+    sub.scale_y = 1.4
+    sub.operator("texture_plugger.create_set", icon="NEWFOLDER")
+
+    obj = context.view_layer.objects.active if context.view_layer else None
+    mat = obj.active_material if node_builder.object_supports_material(obj) else None
+    folder = workflow.material_project(mat)
+    layout.separator()
+    if folder:
+        layout.label(text=f"Set: {mat.name}", icon="TEXTURE")
+    row = layout.row()
+    row.scale_y = 1.2
+    row.enabled = bool(folder)
+    row.operator("texture_plugger.edit_in_painter", icon="TPAINT_HLT")
+    row = layout.row(align=True)
+    row.operator("texture_plugger.reload_images", icon="FILE_REFRESH")
+    sub = row.row(align=True)
+    sub.enabled = bool(folder)
+    sub.operator("texture_plugger.open_set_folder", icon="FILE_FOLDER")
+    row = layout.row()
+    row.enabled = bool(folder)
+    row.operator("texture_plugger.unlink_set", icon="UNLINKED")
+    p = prefs.get_prefs(context)
+    if p is not None:
+        layout.prop(p, "auto_reload")
+
+
 def _shader_poll(context):
     space = context.space_data
     return getattr(space, "tree_type", "") == "ShaderNodeTree"
@@ -139,6 +178,15 @@ class TEXTUREPLUGGER_PT_view3d(_PanelBase, bpy.types.Panel):
 
     def draw(self, context):
         _draw_main(self, context)
+
+
+class TEXTUREPLUGGER_PT_view3d_paint(_PanelBase, bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_label = "Create & Paint"
+    bl_parent_id = "TEXTUREPLUGGER_PT_view3d"
+
+    def draw(self, context):
+        _draw_paint(self, context)
 
 
 class TEXTUREPLUGGER_PT_view3d_options(_PanelBase, bpy.types.Panel):
@@ -164,6 +212,19 @@ class TEXTUREPLUGGER_PT_shader(_PanelBase, bpy.types.Panel):
         _draw_main(self, context)
 
 
+class TEXTUREPLUGGER_PT_shader_paint(_PanelBase, bpy.types.Panel):
+    bl_space_type = "NODE_EDITOR"
+    bl_label = "Create & Paint"
+    bl_parent_id = "TEXTUREPLUGGER_PT_shader"
+
+    @classmethod
+    def poll(cls, context):
+        return _shader_poll(context)
+
+    def draw(self, context):
+        _draw_paint(self, context)
+
+
 class TEXTUREPLUGGER_PT_shader_options(_PanelBase, bpy.types.Panel):
     bl_space_type = "NODE_EDITOR"
     bl_label = "Options"
@@ -181,8 +242,10 @@ class TEXTUREPLUGGER_PT_shader_options(_PanelBase, bpy.types.Panel):
 classes = (
     TEXTUREPLUGGER_UL_slots,
     TEXTUREPLUGGER_PT_view3d,
+    TEXTUREPLUGGER_PT_view3d_paint,
     TEXTUREPLUGGER_PT_view3d_options,
     TEXTUREPLUGGER_PT_shader,
+    TEXTUREPLUGGER_PT_shader_paint,
     TEXTUREPLUGGER_PT_shader_options,
 )
 

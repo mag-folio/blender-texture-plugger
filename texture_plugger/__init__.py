@@ -9,7 +9,7 @@ for extensions.
 bl_info = {
     "name": "Texture Plugger",
     "author": "Texture Plugger contributors",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (4, 5, 0),
     "location": "3D Viewport / Shader Editor > Sidebar > Texture Plugger; File > Import",
     "description": "Detect PBR texture maps from filenames and wire them into a Principled BSDF",
@@ -18,14 +18,15 @@ bl_info = {
 
 if "bpy" in locals():
     import importlib
-    for _mod in (detection, prefs, properties, node_builder, operators, ui):  # noqa: F821
+    for _mod in (detection, scaffold, prefs, properties, node_builder, operators,  # noqa: F821
+                 workflow, ui):  # noqa: F821
         importlib.reload(_mod)
 else:
-    from . import detection, prefs, properties, node_builder, operators, ui
+    from . import detection, scaffold, prefs, properties, node_builder, operators, workflow, ui
 
 import bpy  # noqa: E402
 
-_modules = (prefs, properties, operators, ui)
+_modules = (prefs, properties, operators, workflow, ui)
 
 
 def register():

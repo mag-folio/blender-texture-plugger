@@ -95,6 +95,42 @@ def store_analysis(context, settings, paths, analysis):
     return best
 
 
+def store_known_set(settings, set_name, items, set_key=""):
+    """Store one texture set whose map types are already known.
+
+    ``items`` is an iterable of ``(map_type, path)``; no filename detection runs.
+    """
+    global _suppress_set_update
+    items = [(mt, p) for mt, p in items]
+    set_key = set_key or set_name.lower()
+    settings.files.clear()
+    for _, pth in items:
+        settings.files.add().path = pth
+    settings.sets.clear()
+    entry = settings.sets.add()
+    entry.key = set_key
+    entry.name = set_name
+    entry.count = len(items)
+    _suppress_set_update = True
+    try:
+        settings.active_set = set_key
+    except Exception:
+        pass
+    finally:
+        _suppress_set_update = False
+    settings.slots.clear()
+    settings.slot_index = 0
+    settings.set_name = set_name
+    settings.set_key = set_key
+    for map_type, pth in items:
+        slot = settings.slots.add()
+        slot.map_type = map_type
+        slot.filepath = pth
+        slot.enabled = True
+        slot.udim_tiles = ""
+        slot.note = ""
+
+
 def populate_slots_from_files(context, settings):
     """Re-run detection on the stored files and fill slots for the active set."""
     if _suppress_set_update:

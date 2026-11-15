@@ -2,7 +2,7 @@
 
 Run through tests/run_blender_tests.ps1, or manually:
   blender --background --factory-startup --python-exit-code 1 \
-          --python tests/blender_test.py -- --zip dist/texture_plugger-1.0.0.zip
+          --python tests/blender_test.py -- --zip dist/texture_plugger-1.1.0.zip
   blender ... --python tests/blender_test.py -- --legacy        (package already in scripts/addons)
 
 Use an isolated BLENDER_USER_RESOURCES directory so your real config is untouched.
@@ -553,6 +553,241 @@ def test_multiple_sets():
           [sl.filepath for sl in s.slots])
 
 
+def _tex_image_node(mat, role):
+    for n in mat.node_tree.nodes:
+        if n.bl_idname == "ShaderNodeTexImage" and n.get(TAG) == "image:" + role:
+            return n
+    return None
+
+
+_SCAFFOLD = []     # the installed add-on's scaffold module, set by test_create_and_paint
+
+
+def _write_png(path, size, rgb):
+    """Replace ``path`` with a solid colour PNG (uses the add-on's pure-Python writer)."""
+    if os.path.exists(path):
+        os.remove(path)
+    _SCAFFOLD[0].write_png(path, size, size, rgb)
+
+
+def run_op(fn, **kw):
+    """Run an operator; an ERROR report makes bpy.ops raise RuntimeError after CANCELLED.
+
+    Returns ("CANCELLED"/"FINISHED"/..., message).
+    """
+    try:
+        res = fn(**kw)
+    except RuntimeError as ex:
+        return "CANCELLED", str(ex)
+    return ("FINISHED" if "FINISHED" in res else "CANCELLED"), ""
+
+
+def test_create_unsaved_relative():
+    """Must run while the session's .blend is still unsaved (before test_manual_slots...)."""
+    print("\n[create_set: unsaved '//' path and empty folder]")
+    check("session starts unsaved", not bpy.data.filepath, bpy.data.filepath)
+    obj = new_cube("PaintUnsaved", (0, 40, 0))
+    select_only(obj)
+    n_mats = len(bpy.data.materials)
+    res = run_op(bpy.ops.texture_plugger.create_set, directory="//paint_rel_unsaved")
+    check("unsaved + '//' folder -> CANCELLED", res[0] == "CANCELLED" and "folder" in res[1], res)
+    res = run_op(bpy.ops.texture_plugger.create_set, directory="")
+    check("empty folder -> CANCELLED", res[0] == "CANCELLED" and "folder" in res[1], res)
+    check("cancelled runs left no material", obj.active_material is None
+          and len(bpy.data.materials) == n_mats)
+    check("cancelled runs created no folder",
+          not os.path.exists(os.path.join(os.getcwd(), "paint_rel_unsaved")))
+
+
+def test_create_and_paint(module):
+    print("\n[Create & Paint: create_set, reload, edit_in_painter]")
+    import importlib
+    pkg = importlib.import_module(module)
+    wf = pkg.workflow
+    _SCAFFOLD[:] = [pkg.scaffold]
+    prefs = bpy.context.preferences.addons[module].preferences
+    s = settings()
+
+    # --- registration
+    for op in ("create_set", "edit_in_painter", "reload_images", "open_set_folder"):
+        check(f"operator {op}", hasattr(bpy.ops.texture_plugger, op))
+    check("3D view paint panel", hasattr(bpy.types, "TEXTUREPLUGGER_PT_view3d_paint"))
+    check("shader editor paint panel", hasattr(bpy.types, "TEXTUREPLUGGER_PT_shader_paint"))
+    check("reload timer registered", bpy.app.timers.is_registered(wf._timer))
+    check("create_* defaults", s.create_base_color and s.create_normal and s.create_metallic
+          and s.create_roughness and not s.create_emission and not s.create_alpha
+          and not s.create_displacement and s.create_resolution == "1024")
+
+    root = os.path.join(TMP, "paint")
+    os.makedirs(root, exist_ok=True)
+    other = new_cube("PaintOther", (0, 44, 0))
+    obj = new_cube("PaintCrate", (3, 44, 0))
+    select_only(obj)
+    other.select_set(True)
+
+    saved = {k: getattr(s, k) for k in ("create_root", "create_name", "create_resolution")}
+    saved_toggles = {k: getattr(s, k) for k in dir(s) if k.startswith("create_")
+                     and isinstance(getattr(s, k), bool)}
+    saved_painter = prefs.painter_path
+    orig_launch = wf._launch
+    try:
+        # --- no maps enabled: no side effects at all
+        for k in saved_toggles:
+            setattr(s, k, False)
+        n_mats = len(bpy.data.materials)
+        res = run_op(bpy.ops.texture_plugger.create_set, directory=root)
+        check("no maps enabled -> CANCELLED", res[0] == "CANCELLED", res)
+        check("no maps: no folder", not os.path.exists(os.path.join(root, "PaintCrate")))
+        check("no maps: no material", obj.active_material is None
+              and len(bpy.data.materials) == n_mats)
+        for k, v in saved_toggles.items():
+            setattr(s, k, v)
+
+        # --- empty folder (neither argument nor setting)
+        s.create_root = ""
+        res = run_op(bpy.ops.texture_plugger.create_set, directory="")
+        check("empty folder -> CANCELLED (settings empty too)", res[0] == "CANCELLED", res)
+        check("empty folder: no material", obj.active_material is None)
+
+        # --- create
+        res = bpy.ops.texture_plugger.create_set(directory=root)
+        check("create_set finished", res == {"FINISHED"}, res)
+        mat = obj.active_material
+        check("material named after object", mat is not None and mat.name == "PaintCrate",
+              mat and mat.name)
+        folder = os.path.join(root, "PaintCrate")
+        tex = os.path.join(folder, "textures")
+        fbx = os.path.join(folder, "mesh", "PaintCrate.fbx")
+        expected = ["PaintCrate_BaseColor.png", "PaintCrate_Metallic.png",
+                    "PaintCrate_Normal.png", "PaintCrate_Roughness.png"]
+        check("only default maps created", sorted(os.listdir(tex)) == expected,
+              sorted(os.listdir(tex)))
+        check("FBX exported", os.path.isfile(fbx) and os.path.getsize(fbx) > 0)
+        check("PROJECT_KEY stored", mat.get(wf.PROJECT_KEY) == folder, mat.get(wf.PROJECT_KEY))
+        check("MESH_KEY stored", mat.get(wf.MESH_KEY) == fbx, mat.get(wf.MESH_KEY))
+        check("material_project() helper", wf.material_project(mat) == folder)
+        check("selection restored", obj.select_get() and other.select_get()
+              and bpy.context.view_layer.objects.active == obj)
+        check("create_root setting untouched by directory arg", s.create_root == "")
+
+        bsdf = principled(mat.node_tree)
+        for sock in ("Base Color", "Metallic", "Roughness", "Normal"):
+            check(f"BSDF {sock} linked", bsdf.inputs[sock].is_linked)
+        base = src_node(bsdf.inputs["Base Color"])
+        check("Base Color <- image node, sRGB", base is not None
+              and base.bl_idname == "ShaderNodeTexImage" and image_cs(base) == "sRGB",
+              base and image_cs(base))
+        check("Metallic Non-Color", image_cs(src_node(bsdf.inputs["Metallic"])) == "Non-Color")
+        check("Roughness Non-Color", image_cs(src_node(bsdf.inputs["Roughness"])) == "Non-Color")
+        nm = src_node(bsdf.inputs["Normal"])
+        check("Normal <- Normal Map node", nm is not None and nm.bl_idname == "ShaderNodeNormalMap", nm)
+        check("normal image Non-Color", nm is not None
+              and image_cs(src_node(nm.inputs["Color"])) == "Non-Color")
+        for role, fname in (("base_color", expected[0]), ("metallic", expected[1]),
+                            ("roughness", expected[3])):
+            node = _tex_image_node(mat, role)
+            check(f"{role} image points at {fname}", node is not None and node.image is not None
+                  and os.path.normcase(os.path.abspath(bpy.path.abspath(node.image.filepath)))
+                  == os.path.normcase(os.path.join(tex, fname)),
+                  node and node.image and node.image.filepath)
+        imgs = [n.image for n in mat.node_tree.nodes if n.bl_idname == "ShaderNodeTexImage"]
+        check("images are watched", len(imgs) == 4 and all(i.get("texture_plugger_watch") for i in imgs),
+              [i.get("texture_plugger_watch") for i in imgs])
+        check("placeholder is 1024x1024", tuple(imgs[0].size) == (1024, 1024), tuple(imgs[0].size))
+        check("panel state shows the set", s.set_name == "PaintCrate" and len(s.slots) == 4
+              and len(s.sets) == 1, (s.set_name, len(s.slots), len(s.sets)))
+
+        # --- re-run never overwrites
+        rough = os.path.join(tex, "PaintCrate_Roughness.png")
+        _write_png(rough, 16, (10, 20, 30))
+        with open(rough, "rb") as fh:
+            before = fh.read()
+        n_mats = len(bpy.data.materials)
+        res = bpy.ops.texture_plugger.create_set(directory=root)
+        check("second create_set finished", res == {"FINISHED"}, res)
+        with open(rough, "rb") as fh:
+            check("modified file not overwritten", fh.read() == before)
+        check("re-run keeps the material", obj.active_material == mat and mat.name == "PaintCrate"
+              and len(bpy.data.materials) == n_mats, mat.name)
+        check("re-run keeps four BSDF links", all(bsdf.inputs[k].is_linked for k in
+              ("Base Color", "Metallic", "Roughness", "Normal")))
+
+        # --- live reload
+        rimg = _tex_image_node(mat, "roughness").image
+        bimg = _tex_image_node(mat, "base_color").image
+        for _ in range(3):
+            wf.check_reload()
+        check("kept modified roughness was reloaded", tuple(rimg.size) == (16, 16), tuple(rimg.size))
+        check("untouched image has original size", tuple(bimg.size) == (1024, 1024), tuple(bimg.size))
+        check("check_reload is quiet when nothing changed", wf.check_reload() == [])
+        base_path = os.path.join(tex, "PaintCrate_BaseColor.png")
+        _write_png(base_path, 8, (255, 0, 0))
+        calls = [wf.check_reload() for _ in range(3)]
+        check("reload happens on the second call after a change",
+              calls[0] == [] and bimg.name in calls[1] and calls[2] == [], calls)
+        check("reloaded pixels", tuple(bimg.size) == (8, 8), tuple(bimg.size))
+
+        # dirty images are never reloaded
+        bimg.pixels[0] = 0.5
+        check("image is dirty", bimg.is_dirty)
+        _write_png(base_path, 4, (0, 255, 0))
+        calls = [wf.check_reload() for _ in range(3)] + [wf.check_reload(force=True)]
+        check("dirty image not reloaded", all(bimg.name not in c for c in calls)
+              and tuple(bimg.size) == (8, 8), (calls, tuple(bimg.size)))
+        bimg.reload()      # drop the unsaved paint so later checks start clean
+        check("reload() cleared dirty state", not bimg.is_dirty)
+
+        # reload_images operator forces a reload
+        _write_png(rough, 32, (1, 2, 3))
+        res = bpy.ops.texture_plugger.reload_images()
+        check("reload_images finished", res == {"FINISHED"}, res)
+        check("reload_images reloaded at once", tuple(rimg.size) == (32, 32), tuple(rimg.size))
+
+        # --- name collision -> _2
+        obj2 = new_cube("PaintCrate2", (6, 44, 0))
+        select_only(obj2)
+        res = bpy.ops.texture_plugger.create_set(directory=root, name="PaintCrate")
+        check("collision create_set finished", res == {"FINISHED"}, res)
+        check("collision renamed to PaintCrate_2", obj2.active_material is not None
+              and obj2.active_material.name == "PaintCrate_2",
+              obj2.active_material and obj2.active_material.name)
+        check("PaintCrate_2 files", os.path.isfile(os.path.join(
+            root, "PaintCrate_2", "textures", "PaintCrate_2_BaseColor.png")))
+        check("first material untouched by collision", obj.active_material == mat
+              and mat.name == "PaintCrate")
+
+        # --- edit_in_painter (launch replaced, never starts Painter)
+        fake = os.path.join(TMP, "Fake Painter.exe")
+        with open(fake, "wb"):
+            pass
+        prefs.painter_path = fake
+        launched = []
+        wf._launch = lambda cmd, cwd=None: launched.append((cmd, cwd))
+        select_only(obj)
+        res = bpy.ops.texture_plugger.edit_in_painter()
+        check("edit_in_painter (mesh form)", res == {"FINISHED"} and launched and launched[-1] == (
+            [fake, "--mesh", fbx, "--export-path", tex], os.path.dirname(fake)), launched)
+        spp = os.path.join(folder, "PaintCrate.spp")
+        with open(spp, "wb"):
+            pass
+        res = bpy.ops.texture_plugger.edit_in_painter()
+        check("edit_in_painter (.spp form)", res == {"FINISHED"} and launched[-1] == (
+            [fake, "--export-path", tex, spp], os.path.dirname(fake)), launched[-1])
+        n_launched = len(launched)
+        plain = new_cube("PaintPlain", (9, 44, 0))
+        select_only(plain)
+        res = run_op(bpy.ops.texture_plugger.edit_in_painter)
+        check("edit_in_painter without a set -> CANCELLED, nothing launched",
+              res[0] == "CANCELLED" and len(launched) == n_launched, (res, len(launched)))
+    finally:
+        wf._launch = orig_launch
+        prefs.painter_path = saved_painter
+        for k, v in saved.items():
+            setattr(s, k, v)
+        for k, v in saved_toggles.items():
+            setattr(s, k, v)
+
+
 class _FakeOp:
     def __setattr__(self, k, v):
         object.__setattr__(self, k, v)
@@ -623,6 +858,20 @@ def test_ui_draw(module):
         except Exception as ex:
             FakeLayout.errors.append(f"draw raised {ex!r}")
     s.projection, s.height_mode = "UV", "DISPLACEMENT"
+    # Create & Paint panel: without a texture set, then with one on the material
+    paint_mat = bpy.data.materials.new("UiPaintMat")
+    for with_set in (False, True):
+        if with_set:
+            paint_mat[pkg.workflow.PROJECT_KEY] = TMP
+            obj.data.materials.append(paint_mat)
+        p = P()
+        p.layout = FakeLayout()
+        try:
+            ui._draw_paint(p, bpy.context)
+        except Exception as ex:
+            FakeLayout.errors.append(f"_draw_paint raised {ex!r}")
+    obj.data.materials.clear()
+    bpy.data.materials.remove(paint_mat)
     # UIList row
     try:
         ui.TEXTUREPLUGGER_UL_slots.draw_item(None, bpy.context, FakeLayout(), s, s.slots[0],
@@ -653,6 +902,75 @@ def test_ui_draw(module):
     check("panels/list/prefs draw without errors", not FakeLayout.errors, FakeLayout.errors)
 
 
+def test_undo_cannot_break_link(module):
+    print("\n[undo cannot break a texture set link; Unlink does]")
+    import importlib
+    wf = importlib.import_module(module).workflow
+    check("operator unlink_set", hasattr(bpy.ops.texture_plugger, "unlink_set"))
+    check("undo/redo/load handlers registered",
+          wf._on_undo_redo in bpy.app.handlers.undo_post
+          and wf._on_undo_redo in bpy.app.handlers.redo_post
+          and wf._on_load in bpy.app.handlers.load_post)
+    root = os.path.join(TMP, "undo")
+    os.makedirs(root, exist_ok=True)
+    obj = new_cube("UndoPot", (0, 50, 0))
+    select_only(obj)
+    res = bpy.ops.texture_plugger.create_set(directory=root, name="UndoPot")
+    mat = obj.active_material
+    folder = os.path.join(root, "UndoPot")
+    check("set created", res == {"FINISHED"} and wf.material_project(mat) == folder)
+    check("nothing to repair while linked", wf.heal() == [])
+
+    def simulate_undo():
+        # What Ctrl+Z after Create leaves behind: no material, no panel state.
+        m = obj.active_material
+        obj.data.materials.clear()
+        if m is not None and m.users == 0:
+            bpy.data.materials.remove(m)
+        s = settings()
+        s.slots.clear()
+        s.files.clear()
+        s.sets.clear()
+        s.set_name = ""
+
+    base = os.path.join(folder, "textures", "UndoPot_BaseColor.png")
+    with open(base, "rb") as fh:
+        before = fh.read()
+    simulate_undo()
+    check("repair relinks the set", wf.heal() == ["UndoPot"])
+    mat = obj.active_material
+    check("material back with the same name", mat is not None and mat.name == "UndoPot",
+          mat.name if mat else None)
+    check("link restored", wf.material_project(mat) == folder)
+    check("mesh link restored", os.path.isfile(str(mat.get(wf.MESH_KEY) or "")))
+    check("textures plugged in again", principled(mat.node_tree).inputs["Base Color"].is_linked
+          and principled(mat.node_tree).inputs["Roughness"].is_linked)
+    check("panel state restored", settings().set_name == "UndoPot" and len(settings().slots) == 4)
+    with open(base, "rb") as fh:
+        check("repair does not rewrite files", fh.read() == before)
+
+    # Swapping the material by hand is not an undo: the old one keeps the link.
+    own = bpy.data.materials.new("UndoOwn")
+    obj.active_material = own
+    check("manual material swap is left alone", wf.heal() == [] and obj.active_material == own)
+    obj.active_material = mat
+
+    # load_post rebuilds the registry from the file's materials
+    wf._on_load()
+    check("registry rebuilt from materials", wf._folder_key(folder) in wf._registry)
+
+    # Unlink is the only way out
+    res = bpy.ops.texture_plugger.unlink_set()
+    check("unlink finished", res == {"FINISHED"} and not wf.material_project(mat)
+          and mat.get(wf.MESH_KEY) is None)
+    check("unlink keeps the nodes", principled(mat.node_tree).inputs["Base Color"].is_linked)
+    check("unlink keeps the files", os.path.isfile(base))
+    simulate_undo()
+    check("no repair after unlink", wf.heal() == [] and obj.active_material is None)
+    res = run_op(bpy.ops.texture_plugger.unlink_set)
+    check("unlink without a link -> CANCELLED", res[0] == "CANCELLED", res)
+
+
 def test_disable_enable(module):
     print("\n[disable / re-enable]")
     try:
@@ -669,6 +987,7 @@ def main():
     try:
         module = install()
         test_registration(module)
+        test_create_unsaved_relative()     # needs the session .blend to be unsaved
         test_basic_set()
         test_packed_dx_gloss()
         test_udim()
@@ -677,6 +996,8 @@ def main():
         test_multiple_sets()
         test_manual_slots_and_robustness(module)
         test_ui_draw(module)
+        test_create_and_paint(module)
+        test_undo_cannot_break_link(module)
         test_disable_enable(module)
     except Exception:
         traceback.print_exc()

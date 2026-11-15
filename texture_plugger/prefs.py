@@ -113,6 +113,15 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
     recursive: BoolProperty(name="Scan Subfolders", default=False,
                             description="When a folder is picked, also scan its subfolders")
     show_keywords: BoolProperty(name="Show Keyword Lists", default=False)
+    painter_path: StringProperty(
+        name="Substance Painter", subtype="FILE_PATH", default="",
+        description="Adobe Substance 3D Painter executable (leave empty to auto-detect)")
+    auto_reload: BoolProperty(
+        name="Auto Reload Textures", default=True,
+        description="Reload plugged-in images when their files change on disk")
+    reload_interval: FloatProperty(
+        name="Check Interval", default=1.0, min=0.25, max=60.0,
+        description="Seconds between checks for changed texture files")
 
     def draw(self, context):
         layout = self.layout
@@ -130,6 +139,15 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         box.prop(self, "format_priority")
         box.prop(self, "data_format_priority")
         box.prop(self, "recursive")
+
+        box = col.box()
+        box.label(text="Substance Painter", icon="TPAINT_HLT")
+        box.prop(self, "painter_path")
+        row = box.row()
+        row.prop(self, "auto_reload")
+        sub = row.row()
+        sub.active = self.auto_reload
+        sub.prop(self, "reload_interval")
 
         box = col.box()
         row = box.row()

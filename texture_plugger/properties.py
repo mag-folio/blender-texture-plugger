@@ -7,7 +7,13 @@ import bpy
 from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, IntProperty,
                        PointerProperty, StringProperty)
 
-from . import detection, prefs
+from . import detection, prefs, scaffold
+
+CREATE_RESOLUTION_ITEMS = (
+    ("1024", "1K", "1024 x 1024 placeholders"),
+    ("2048", "2K", "2048 x 2048 placeholders"),
+    ("4096", "4K", "4096 x 4096 placeholders"),
+)
 
 SLOT_TYPE_ITEMS = [("NONE", "Unassigned", "Not used")] + [
     (mt.id, mt.label, mt.description or mt.label) for mt in detection.SLOT_TYPES
@@ -80,9 +86,24 @@ class TEXTUREPLUGGER_PG_settings(bpy.types.PropertyGroup):
     initialized: BoolProperty(default=False)
     show_options: BoolProperty(name="Options", default=False)
 
+    # Create & Paint (Substance Painter round trip)
+    create_root: StringProperty(
+        name="Folder", subtype="DIR_PATH", default="",
+        description="Parent folder; a subfolder per texture set is created inside it")
+    create_name: StringProperty(
+        name="Name", default="",
+        description="Texture set and material name (empty = use the material or object name)")
+    create_resolution: EnumProperty(
+        name="Size", items=CREATE_RESOLUTION_ITEMS, default="1024",
+        description="Placeholder size; Painter overwrites the files at its own export size")
+
 
 for _name, _prop in prefs.option_annotations().items():
     TEXTUREPLUGGER_PG_settings.__annotations__[_name] = _prop
+for _spec in scaffold.MAPS:
+    TEXTUREPLUGGER_PG_settings.__annotations__["create_" + _spec.id] = BoolProperty(
+        name=_spec.label, default=_spec.default,
+        description=f"Create a {_spec.label} placeholder ({_spec.suffix})")
 
 
 def copy_defaults_from_prefs(settings, p):
