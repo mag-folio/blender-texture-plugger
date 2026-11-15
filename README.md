@@ -169,22 +169,23 @@ Non-Color. Because the add-on writes the textures, the material is wired up stra
    export with the **Blender (Principled BSDF)** template as PNG. Every object in Blender
    updates from that one export.
 
-**Big scenes are sized to your computer automatically.** Every texture set has to fit in
-memory once Blender shows the painted textures, so:
+**Big scenes are sized to your computer automatically.** The add-on reads the computer's
+memory and graphics memory and uses measured Painter costs, so nothing can overload it:
 
-- **Texture size:** if the scene would need more than about 40% of the computer's memory at
-  the *Size* you picked, a smaller size is used (for example 965 objects on a 32 GB PC get
-  512 px instead of 2048 px). Painter's texture sets are set to that size for you.
-- **Painter parts:** a scene with more than 50 texture sets is split into parts (objects
-  from the same collection and group stay together). **Edit Scene in Painter** opens the
-  part that holds the selected object; select an object elsewhere and press it again for
-  another part. Each part's Painter project is saved for you in the scene folder
-  (`<blend name>_scene_part07.spp`), so pressing the button again reopens your work.
+- **One Painter project when it fits:** **Edit Scene in Painter** opens the whole scene as
+  one project whenever the computer can hold it, lowering the texture size if needed
+  (for example 965 objects on a 32 GB PC with a 12 GB graphics card open together at
+  256 px). Painter's texture sets are set to that size for you, and the project is saved
+  as `<blend name>_scene.spp` in the scene folder, so the next press reopens your work.
+- **Parts only when it can't:** a scene too big even at 256 px is split into parts (objects
+  from the same collection and group stay together), and the button opens the part that
+  holds the selected object.
 - **No freezing:** Create Sets for Scene runs in small steps with progress in the status
   bar; **Esc** stops it, and pressing it again finishes the rest.
 
-Both limits can be changed in the add-on preferences (*Max Texture Sets per Scene*,
-*Texture Memory Budget*). Placeholders are flat colours and are written small; untouched
+The plan is made again on every press, so it follows the computer you are on. The add-on
+preferences have *Texture Memory Budget* and *Max Texture Sets per Painter Project*
+(0 = automatic). Placeholders are flat colours and are written small; untouched
 placeholders from an earlier run are shrunk too, painted textures are never touched.
 
 ## Painter Link: Blender lighting, solo and orbit in Painter
