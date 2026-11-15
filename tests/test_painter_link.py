@@ -94,6 +94,41 @@ class Contract(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_plugin_picks_render_or_preview_lighting(self):
+        data = {"environment": "env_scene.exr",
+                "preview": {"environment": "env_preview.exr", "hdri": "forest.exr"}}
+        own = {"environment": "env_own.exr"}
+        self.assertEqual(br.pick_environment(data, own, "render"), ("env_own.exr", "render"))
+        self.assertEqual(br.pick_environment(data, None, "render"), ("env_scene.exr", "render"))
+        self.assertEqual(br.pick_environment(data, own, "preview"), ("env_preview.exr", "preview"))
+        no_preview = {"environment": "env_scene.exr"}
+        self.assertEqual(br.pick_environment(no_preview, own, "preview"), ("env_own.exr", "render"))
+        self.assertEqual(br.pick_environment(None, None, "preview"), (None, "render"))
+
+    def test_plugin_finds_the_folder_blender_watches(self):
+        d = tempfile.mkdtemp(prefix="tp_set_")
+        try:
+            tex = os.path.join(d, "Crate", "textures")
+            os.makedirs(tex)
+            os.makedirs(os.path.join(d, "Crate", "mesh"))
+            spp = os.path.join(d, "Crate", "Crate.spp")
+            fbx = os.path.join(d, "Crate", "mesh", "Crate.fbx")
+            self.assertEqual(br.blender_textures_dir(spp, ""), tex)          # saved project
+            self.assertEqual(br.blender_textures_dir("", fbx), tex)          # new from mesh
+            self.assertEqual(br.blender_textures_dir("", "", tex), tex)      # --export-path
+            self.assertEqual(br.blender_textures_dir("", "", d), "")         # not a textures folder
+            self.assertEqual(br.blender_textures_dir(os.path.join(d, "x.spp"), ""), "")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_export_config_is_blender_template_as_png(self):
+        cfg = br.blender_export_config("C:/t/textures", ["Crate", "Barrel"], "resource://x")
+        self.assertEqual(cfg["exportPath"], "C:/t/textures")
+        self.assertEqual(cfg["exportList"], [{"rootPath": "Crate"}, {"rootPath": "Barrel"}])
+        self.assertEqual(cfg["exportParameters"][0]["parameters"]["fileFormat"], "png")
+        self.assertEqual(cfg["exportParameters"][0]["parameters"]["paddingAlgorithm"], "infinite")
+        self.assertEqual(br.BLENDER_PRESET, "Blender (Principled BSDF)")
+
     def test_broken_link_file_is_ignored(self):
         d = tempfile.mkdtemp(prefix="tp_link_")
         try:
@@ -163,6 +198,16 @@ class LinkFile(unittest.TestCase):
         data = pl.read_link(pl.write_link(self.d, {"A": self.box("a")}, active="A"))
         self.assertEqual(data["sets"]["A"]["lighting_key"], "k1")
         self.assertEqual(data["sets"]["A"]["environment"], "env_a.exr")
+
+    def test_preview_lighting_is_kept_and_referenced(self):
+        prev = {"environment": "env_preview_1.exr", "exposure": 0.0, "hdri": "forest.exr"}
+        pl.write_link(self.d, {"A": self.box("a")}, active="A", environment="env_a.exr",
+                      preview=prev)
+        data = pl.read_link(pl.write_link(self.d, {"A": self.box("a")}, active="A"))
+        self.assertEqual(data["preview"]["environment"], "env_preview_1.exr")   # view-only keeps it
+        self.assertEqual(pl.referenced_environments(data), {"env_a.exr", "env_preview_1.exr"})
+        data = pl.read_link(pl.write_link(self.d, {"A": self.box("a")}, active="A", preview={}))
+        self.assertNotIn("preview", data)
 
     def test_removed_sets_are_dropped(self):
         pl.write_link(self.d, {"A": self.box("a"), "B": self.box("b")})

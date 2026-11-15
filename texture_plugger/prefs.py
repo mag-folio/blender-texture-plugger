@@ -151,6 +151,11 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         name="Include Surroundings", default=True,
         description="Bake the rest of the scene too (bounce light, reflections, shadows "
                     "from other objects). Off: only the world and the lamps")
+    env_preview: BoolProperty(
+        name="Send Material Preview Lighting", default=True,
+        description="Also send the viewport's Material Preview lighting (its studio HDRI, "
+                    "rotation and strength), so Painter can switch between it and the "
+                    "render lighting")
 
     def draw(self, context):
         layout = self.layout
@@ -186,6 +191,7 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         grid.prop(self, "env_samples")
         grid.prop(self, "light_min_size")
         grid.prop(self, "env_surroundings")
+        grid.prop(self, "env_preview")
         box.operator("texture_plugger.install_painter_plugin", icon="IMPORT")
 
         box = col.box()

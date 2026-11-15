@@ -8,12 +8,15 @@ loads with Painter.  It adds a "Blender Link" panel (Window > Views) and a
 
 * Lighting: Blender bakes its world, lamps and surroundings into an HDR seen
   from the object; this plugin makes it Painter's environment map, and swaps
-  to the right object's lighting when you solo another texture set.
+  to the right object's lighting when you solo another texture set.  A switch
+  shows Blender's Material Preview lighting (its studio HDRI) instead.
 * Solo: shows only one texture set (Painter's own Focus Mode) and frames the
   camera on it.  While soloing, picking another texture set in Painter's
   Texture Set List frames that one.  Orbit with Alt + left-drag on the object:
   Painter orbits around the point under the cursor.
 * Match Blender View: puts Painter's camera where your Blender viewport is.
+* Export to Blender: exports with the template and file type Blender's add-on
+  reads (Blender (Principled BSDF), PNG) into the folder Blender watches.
 
 Everything comes from ``../../texture_plugger_link/blender_link.json`` (next
 to the ``python`` folder), written by Blender's "Send to Painter" button.
@@ -26,7 +29,7 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "1.2.1"
+PLUGIN_VERSION = "1.3.0"
 LINK_FILE = "blender_link.json"
 LINK_DIR_NAME = "texture_plugger_link"
 FRAME_MARGIN = 1.15
@@ -197,6 +200,70 @@ def match_sets(painter_names, link_sets):
     return out
 
 
+LIGHT_MODES = ("render", "preview")
+
+# What Blender's Texture Plugger reads: <set>_BaseColor.png, <set>_Normal.png, ...
+# exactly as Painter's own "Blender (Principled BSDF)" template names them, as PNG.
+BLENDER_PRESET = "Blender (Principled BSDF)"
+BLENDER_FORMAT = "png"
+
+
+def blender_textures_dir(project_file, mesh_file, default_path=""):
+    """The ``textures`` folder Blender watches for this Painter project, or "".
+
+    Texture Plugger keeps ``<folder>/<name>.spp``, ``<folder>/mesh/<name>.fbx``
+    and ``<folder>/textures``; Blender also starts Painter with
+    ``--export-path <folder>/textures``.
+    """
+    bases = []
+    if project_file:
+        bases.append(os.path.dirname(os.path.abspath(project_file)))
+    if mesh_file:
+        d = os.path.dirname(os.path.abspath(mesh_file))
+        bases.append(os.path.dirname(d) if os.path.basename(d).lower() == "mesh" else d)
+    for base in bases:
+        t = os.path.join(base, "textures")
+        if os.path.isdir(t):
+            return t
+    if (default_path and os.path.basename(os.path.normpath(default_path)).lower() == "textures"
+            and os.path.isdir(default_path)):
+        return default_path
+    return ""
+
+
+def blender_export_config(export_dir, set_names, preset_url):
+    """Painter export settings that give Blender exactly the files it expects."""
+    return {
+        "exportShaderParams": False,
+        "exportPath": export_dir,
+        "defaultExportPreset": preset_url,
+        "exportList": [{"rootPath": n} for n in set_names],
+        # Painter can't resolve the padding from the template alone when exporting
+        # from Python ("padding algorithm could not be resolved", Painter 12.2):
+        # "infinite" is its usual dilation, so seams never show black edges.
+        "exportParameters": [{"parameters": {"fileFormat": BLENDER_FORMAT,
+                                             "paddingAlgorithm": "infinite"}}],
+    }
+
+
+def pick_environment(data, set_info, mode="render"):
+    """(file, kind) of the environment to show; kind is "render" or "preview".
+
+    "render" is Blender's scene lighting (world + lamps) baked around the
+    object: the set's own map, else the scene-wide one.  "preview" is Blender's
+    Material Preview studio HDRI, the same for every set; when Blender did not
+    send one, the render lighting is used.
+    """
+    data = data or {}
+    if mode == "preview":
+        pv = data.get("preview")
+        if isinstance(pv, dict) and pv.get("environment"):
+            return pv["environment"], "preview"
+    if isinstance(set_info, dict) and set_info.get("environment"):
+        return set_info["environment"], "render"
+    return data.get("environment"), "render"
+
+
 def ts_name(texture_set):
     """A Texture Set's name on any Painter version.
 
@@ -245,6 +312,7 @@ class Bridge:
         self.last_active_set = None
         self.last_set_names = ()
         self.auto_light = True
+        self.light_mode = self._load_mode()
         self.follow = True
         self.widget = None
         self.menu = None
@@ -416,11 +484,39 @@ class Bridge:
         return None
 
     def environment_for(self, set_name):
-        d = self.data or {}
-        info = self.set_info(set_name)
-        if info and info.get("environment"):
-            return info["environment"]
-        return d.get("environment")
+        return pick_environment(self.data, self.set_info(set_name), self.light_mode)[0]
+
+    @staticmethod
+    def _settings():
+        from PySide6 import QtCore
+        return QtCore.QSettings("TexturePlugger", "BlenderLink")
+
+    def _load_mode(self):
+        try:
+            mode = str(self._settings().value("light_mode", "render"))
+        except Exception:
+            mode = "render"
+        return mode if mode in LIGHT_MODES else "render"
+
+    def has_preview(self):
+        pv = (self.data or {}).get("preview")
+        return isinstance(pv, dict) and bool(pv.get("environment"))
+
+    def set_light_mode(self, mode):
+        """Switch between Blender's render lighting and its Material Preview lighting."""
+        if mode not in LIGHT_MODES:
+            return False
+        self.light_mode = mode
+        try:
+            self._settings().setValue("light_mode", mode)       # remembered next time
+        except Exception:
+            pass
+        if mode == "preview" and self.data and not self.has_preview():
+            self.log("Blender sent no Material Preview lighting: press Send to Painter "
+                     "in Blender (the add-on sends it with the render lighting)", warn=True)
+        self.apply_lighting(force=True)
+        self.refresh_ui()
+        return True
 
     def apply_lighting(self, set_name=None, force=False):
         import substance_painter.display as dp
@@ -455,9 +551,61 @@ class Bridge:
         dp.set_environment_resource(rs.ResourceID.from_url(url))
         self.apply_tone_mapping()
         self.applied_env = name
-        owner = next((n for n, i in self.sets().items()
-                      if isinstance(i, dict) and i.get("environment") == name), None)
-        self.log("Blender lighting applied" + (f" (baked around '{owner}')" if owner else ""))
+        pv = (self.data or {}).get("preview")
+        if isinstance(pv, dict) and pv.get("environment") == name:
+            hdri = pv.get("hdri")
+            self.log("Blender Material Preview lighting applied" + (f" ({hdri})" if hdri else ""))
+        else:
+            owner = next((n for n, i in self.sets().items()
+                          if isinstance(i, dict) and i.get("environment") == name), None)
+            self.log("Blender render lighting applied" + (f" (baked around '{owner}')" if owner else ""))
+        return True
+
+    # ------------------------------------------------------------------ export
+    def export_dir(self):
+        import substance_painter.export as ex
+        import substance_painter.project as pj
+        project = mesh = default = ""
+        try:
+            project = pj.file_path() or ""
+        except Exception:
+            pass
+        try:
+            mesh = pj.last_imported_mesh_path() or ""
+        except Exception:
+            pass
+        try:
+            default = ex.get_default_export_path() or ""
+        except Exception:
+            pass
+        return blender_textures_dir(project, mesh, default)
+
+    def export_to_blender(self, only_set=None):
+        """Export with the settings Blender's Texture Plugger expects (Blender
+        template, PNG) into the folder Blender watches; Blender reloads them."""
+        import substance_painter.export as ex
+        import substance_painter.resource as rs
+        if not self.project_ready():
+            self.log("open a project first", warn=True)
+            return False
+        out = self.export_dir()
+        if not out:
+            self.log("no Texture Plugger 'textures' folder for this project: open it from "
+                     "Blender (Edit in Substance Painter) or save it in its texture set folder",
+                     warn=True)
+            return False
+        names = [only_set] if only_set else self.texture_set_names()
+        preset = rs.ResourceID(context="starter_assets", name=BLENDER_PRESET).url()
+        try:
+            res = ex.export_project_textures(blender_export_config(out, names, preset))
+        except Exception as exc:
+            self.log(f"export failed: {exc}", warn=True)
+            return False
+        if res.status != ex.ExportStatus.Success:
+            self.log(f"export {res.status.name.lower()}: {res.message}", warn=True)
+            return False
+        n = sum(len(v) for v in res.textures.values())
+        self.log(f"exported {n} texture(s) for Blender to {out}")
         return True
 
     # ------------------------------------------------------------------ camera
@@ -751,6 +899,37 @@ def _make_panel(bridge):
                 grid.addWidget(b, 0, col)
             lay.addLayout(grid)
 
+            row = QtWidgets.QHBoxLayout()
+            b = QtWidgets.QPushButton("Export to Blender")
+            b.setToolTip("Export every texture set with the settings Blender's Texture Plugger "
+                         "expects (Blender (Principled BSDF) template, PNG) into the folder "
+                         "Blender watches. Blender reloads them")
+            b.clicked.connect(lambda: bridge.export_to_blender())
+            row.addWidget(b)
+            b = QtWidgets.QPushButton("Export Selected")
+            b.setToolTip("Same, for the selected texture set only (faster on big scenes)")
+            b.clicked.connect(lambda: bridge.export_to_blender(self.selected()))
+            row.addWidget(b)
+            lay.addLayout(row)
+
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(QtWidgets.QLabel("Lighting:"))
+            self.mode_render = QtWidgets.QRadioButton("Render")
+            self.mode_render.setToolTip("Blender's scene lighting (world + lamps) baked around the "
+                                        "object, like Blender's Rendered view")
+            self.mode_preview = QtWidgets.QRadioButton("Material Preview")
+            self.mode_preview.setToolTip("The studio HDRI of Blender's Material Preview, with its "
+                                         "rotation and strength")
+            group = QtWidgets.QButtonGroup(self)
+            group.addButton(self.mode_render)
+            group.addButton(self.mode_preview)
+            self.mode_render.toggled.connect(lambda v: v and bridge.set_light_mode("render"))
+            self.mode_preview.toggled.connect(lambda v: v and bridge.set_light_mode("preview"))
+            row.addWidget(self.mode_render)
+            row.addWidget(self.mode_preview)
+            row.addStretch(1)
+            lay.addLayout(row)
+
             self.auto = QtWidgets.QCheckBox("Use Blender lighting automatically")
             self.auto.setChecked(bridge.auto_light)
             self.auto.toggled.connect(self._auto)
@@ -799,6 +978,11 @@ def _make_panel(bridge):
                 blend = d.get("blend") or "unsaved .blend"
                 self.info.setText(f"Linked to {blend}. Lighting: {'yes' if env != 'none' else 'not sent'}"
                                   f"{' (soloing)' if bridge.soloing else ''}")
+            for b, mode in ((self.mode_render, "render"), (self.mode_preview, "preview")):
+                b.blockSignals(True)
+                b.setChecked(bridge.light_mode == mode)
+                b.blockSignals(False)
+            self.mode_preview.setEnabled(bridge.has_preview() or bridge.light_mode == "preview")
             current = self.selected() if self.list.count() else None
             self.list.clear()
             names = bridge.texture_set_names() if bridge.project_ready() else []
@@ -843,7 +1027,12 @@ def start_plugin():
                      ("Zoom In", lambda: _bridge.orbit(zoom=0.8)),
                      ("Zoom Out", lambda: _bridge.orbit(zoom=1.25)),
                      ("Match Blender View", lambda: _bridge.match_view()),
-                     ("Apply Blender Lighting", lambda: _bridge.apply_lighting(force=True))):
+                     ("Apply Blender Lighting", lambda: _bridge.apply_lighting(force=True)),
+                     ("Export to Blender", lambda: _bridge.export_to_blender()),
+                     ("Export Active Texture Set to Blender",
+                      lambda: _bridge.export_to_blender(_bridge.active_set_name())),
+                     ("Lighting: Blender Render", lambda: _bridge.set_light_mode("render")),
+                     ("Lighting: Blender Material Preview", lambda: _bridge.set_light_mode("preview"))):
         act = QtGui.QAction(text, menu)
         act.triggered.connect(fn)
         menu.addAction(act)

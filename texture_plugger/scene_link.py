@@ -454,14 +454,20 @@ def probe_point(context, target, depsgraph, centre, radius):
     return best, best is not centre
 
 
+_SCENE_WORLD = object()
+
+
 def bake_environment(context, target, out_path, width=1024, samples=64,
-                     min_light_deg=2.0, surroundings=True):
+                     min_light_deg=2.0, surroundings=True, world=_SCENE_WORLD, lamps=True):
     """Bake the lighting around ``target`` into ``out_path`` (EXR, Painter orientation).
 
     Measured at the object's centre; when lamps exist but none reaches the centre
     and it is closed in (or, without lamps, properly boxed in), at the nearest
     clear spot instead (``probe_point``).  Returns a dict with ``lights``
     (count), ``exposure``, ``path`` and ``moved`` (True when measured off-centre).
+
+    ``world`` replaces the scene's world (Material Preview's studio HDRI) and
+    ``lamps=False`` leaves the lamps out; both are for ``bake_preview``.
     """
     import numpy as np
 
@@ -473,7 +479,9 @@ def bake_environment(context, target, out_path, width=1024, samples=64,
     # it: then the map would be black and useless for painting, so use the
     # nearest clear spot instead.
     lights, moved = None, False
-    if surroundings:
+    if not lamps:
+        lights = []
+    elif surroundings:
         lights = measure_lights(src, view_layer, target, centre, radius, occluders=True)
         if not lights:
             open_ = openness(src, depsgraph, centre, _see_through(context, target),
@@ -493,14 +501,14 @@ def bake_environment(context, target, out_path, width=1024, samples=64,
     sc = _new_scene("TP_EnvBake", src)
     made = []
     try:
-        sc.world = src.world
+        sc.world = src.world if world is _SCENE_WORLD else world
         sc.cycles.samples = samples
         sc.cycles.use_denoising = True
         sc.render.resolution_x, sc.render.resolution_y = width, height
         for ob in src.objects:
             if ob == target or ob.type == "CAMERA" or not _render_visible(ob, view_layer, rendered):
                 continue
-            if ob.type == "LIGHT" or surroundings:
+            if (ob.type == "LIGHT" and lamps) or (ob.type != "LIGHT" and surroundings):
                 sc.collection.objects.link(ob)
         cam = _pano_camera(sc, centre, clip_start=min(radius * 0.05, 0.01))
         made.append(cam)
@@ -564,6 +572,102 @@ def bake_environment(context, target, out_path, width=1024, samples=64,
     finally:
         bpy.data.images.remove(img)
     return {"lights": len(lights), "exposure": exposure, "path": out_path, "moved": moved}
+
+
+# --------------------------------------------------------------------------
+# Material Preview lighting
+# --------------------------------------------------------------------------
+
+DEFAULT_LOOKDEV = "forest.exr"     # Blender's default Material Preview HDRI
+# Mapping-node Z rotation = LOOKDEV_ROT_SIGN * studiolight_rotate_z + LOOKDEV_ROT_OFFSET.
+# Measured against viewport captures in Blender 4.5.12 and 5.0.1 (rotate_z 0, +90,
+# -45, 180 degrees): same angle, no flip, no offset; studiolight_intensity equals
+# Background strength 1:1.
+LOOKDEV_ROT_SIGN = 1.0
+LOOKDEV_ROT_OFFSET = 0.0
+
+
+def preview_settings(context):
+    """What Blender's Material Preview shows, as a dict, from the user's viewport.
+
+    Keys: ``hdri`` (file path or None), ``name``, ``rotation`` (radians, as a
+    Mapping-node Z rotation), ``strength``, ``scene_world`` and
+    ``scene_lights`` (Material Preview set to use the scene's own world/lamps).
+    """
+    space, _rv3d, _region = _find_view3d(context)
+    shading = getattr(space, "shading", None)
+    out = {"hdri": None, "name": DEFAULT_LOOKDEV, "rotation": 0.0, "strength": 1.0,
+           "scene_world": False, "scene_lights": False}
+    if shading is not None:
+        prev_type = shading.type
+        try:
+            # studio_light gives the Material Preview HDRI in Material and Rendered
+            # mode, but Solid mode's studio light otherwise (measured)
+            if prev_type in {"SOLID", "WIREFRAME"}:
+                shading.type = "MATERIAL"
+            out["name"] = shading.studio_light or DEFAULT_LOOKDEV
+            out["rotation"] = (LOOKDEV_ROT_SIGN * float(shading.studiolight_rotate_z)
+                               + LOOKDEV_ROT_OFFSET)
+            out["strength"] = float(shading.studiolight_intensity)
+            out["scene_world"] = bool(getattr(shading, "use_scene_world", False))
+            out["scene_lights"] = bool(getattr(shading, "use_scene_lights", False))
+        finally:
+            if shading.type != prev_type:
+                shading.type = prev_type
+    light = context.preferences.studio_lights.get(out["name"])
+    if light is not None and getattr(light, "path", ""):
+        out["hdri"] = light.path
+    return out
+
+
+def _lookdev_world(settings):
+    """A throw-away world showing the studio HDRI like Material Preview does."""
+    w = bpy.data.worlds.new("TP_LookDev")
+    w.use_nodes = True
+    nt = w.node_tree
+    nt.nodes.clear()
+    coord = nt.nodes.new("ShaderNodeTexCoord")
+    mapping = nt.nodes.new("ShaderNodeMapping")
+    mapping.inputs["Rotation"].default_value = (0.0, 0.0, settings["rotation"])
+    tex = nt.nodes.new("ShaderNodeTexEnvironment")
+    tex.image = bpy.data.images.load(settings["hdri"], check_existing=True)
+    bg = nt.nodes.new("ShaderNodeBackground")
+    bg.inputs["Strength"].default_value = settings["strength"]
+    out = nt.nodes.new("ShaderNodeOutputWorld")
+    nt.links.new(coord.outputs["Generated"], mapping.inputs["Vector"])
+    nt.links.new(mapping.outputs["Vector"], tex.inputs["Vector"])
+    nt.links.new(tex.outputs["Color"], bg.inputs["Color"])
+    nt.links.new(bg.outputs["Background"], out.inputs["Surface"])
+    return w, tex.image
+
+
+def bake_preview(context, target, out_path, width=1024, min_light_deg=2.0):
+    """Bake Blender's Material Preview lighting (the viewport's studio HDRI,
+    rotated and scaled as in the viewport) into ``out_path``, Painter's way up.
+
+    Only the light, no surroundings, as Material Preview shows it.  When
+    Material Preview is set to use the scene world and/or scene lights, those
+    are used instead.  Returns a dict like ``bake_environment`` plus ``hdri``.
+    """
+    st = preview_settings(context)
+    if st["scene_world"]:
+        info = bake_environment(context, target, out_path, width, 16, min_light_deg,
+                                surroundings=False, lamps=st["scene_lights"])
+        info["hdri"] = "scene world"
+        return info
+    if not st["hdri"] or not os.path.isfile(st["hdri"]):
+        raise RuntimeError(f"Material Preview HDRI '{st['name']}' not found")
+    had = {im.name_full for im in bpy.data.images}
+    world, image = _lookdev_world(st)
+    try:
+        info = bake_environment(context, target, out_path, width, 4, min_light_deg,
+                                surroundings=False, world=world, lamps=st["scene_lights"])
+    finally:
+        bpy.data.worlds.remove(world)
+        if image is not None and image.name_full not in had and image.users == 0:
+            bpy.data.images.remove(image)
+    info["hdri"] = st["name"]
+    return info
 
 
 # --------------------------------------------------------------------------
@@ -834,6 +938,7 @@ def send(context, target, lighting=True, view=True, scene=None):
     samples = int(getattr(p, "env_samples", 64)) if p else 64
     min_deg = float(getattr(p, "light_min_size", 2.0)) if p else 2.0
     surroundings = bool(getattr(p, "env_surroundings", True)) if p else True
+    with_preview = bool(getattr(p, "env_preview", True)) if p else True
     warnings = []
     try:
         context.view_layer.update()     # matrices of objects moved by scripts
@@ -841,7 +946,7 @@ def send(context, target, lighting=True, view=True, scene=None):
         pass
     folder = link_dir()
     os.makedirs(folder, exist_ok=True)
-    env_name, info, tone, key = None, None, None, None
+    env_name, info, tone, key, preview = None, None, None, None, None
     if lighting:
         try:
             key = lighting_key(context, surroundings)
@@ -856,6 +961,16 @@ def send(context, target, lighting=True, view=True, scene=None):
             warnings.append("The scene has no world and no lights: the map is black")
         vt = getattr(context.scene.view_settings, "view_transform", "")
         tone = painter_link.tone_mapping_for(vt)
+        if with_preview:
+            pv_name = f"env_preview_{int(time.time() * 1000)}.exr"
+            try:
+                pv = bake_preview(context, target, os.path.join(folder, pv_name), width, min_deg)
+                preview = {"environment": pv_name, "exposure": pv["exposure"], "hdri": pv["hdri"]}
+            except Exception as ex:      # the render lighting still goes through
+                warnings.append(f"Material Preview lighting not sent: {ex}")
+                preview = {}
+        else:
+            preview = {}
     view_data = view_from_context(context, target) if view else None
     if view and view_data is None:
         warnings.append("No 3D viewport or scene camera found: the view was not sent")
@@ -863,13 +978,15 @@ def send(context, target, lighting=True, view=True, scene=None):
     path = painter_link.write_link(
         folder, sets_payload(context), active=set_name_for(target), environment=env_name,
         exposure=info["exposure"] if info else 0.0, view=view_data, blend_name=blend,
-        scene=scene, tone_mapping=tone, lighting_key=key)
+        scene=scene, tone_mapping=tone, lighting_key=key, preview=preview)
     painter_link.prune_environments(
         folder, painter_link.referenced_environments(painter_link.read_link(path)))
     parts = []
     if info:
         where = "from a clear spot next to" if info.get("moved") else "around"
         parts.append(f"lighting {where} '{target.name}' ({info['lights']} lamp(s))")
+    if preview:
+        parts.append(f"Material Preview lighting ({preview.get('hdri')})")
     if view_data:
         parts.append("the view")
     msg = ("Sent " + " and ".join(parts) + " to Painter") if parts else "Sent object bounds"

@@ -42,7 +42,7 @@ are Cycles; the panel screenshot is Blender 5.0's Material Preview.
 
 ## Install
 
-1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-1.2.1.zip`.
+1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-1.3.0.zip`.
 2. In Blender go to **Edit > Preferences > Get Extensions**, open the **v** menu (top right),
    choose **Install from Disk...** and pick the zip.
 3. Check that **Texture Plugger** is enabled.
@@ -319,6 +319,9 @@ Blender preferences and extensions are never changed.
   (unless they have a fake user or unsaved paint).
 - Create & Paint: Painter must export with the "Blender (Principled BSDF)" template as PNG.
   With any other template the file names don't match and Blender won't pick them up.
+  The **Export to Blender** button in Painter's Blender Link panel (also in the Texture
+  Plugger menu) always does exactly that, into the folder Blender watches. Painter's API
+  can't add a preset to its own Export dialog, so the button is the way to make it stick.
 - Create & Paint: if you change the geometry in Blender after the project was started, the
   mesh is not updated in Painter. Re-import the mesh in Painter (the add-on exports it again
   to `mesh/` each time you press **Edit in Substance Painter** without a saved `.spp`).

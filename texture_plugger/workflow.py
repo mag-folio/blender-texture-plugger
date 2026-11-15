@@ -599,8 +599,9 @@ class TEXTUREPLUGGER_OT_edit_in_painter(bpy.types.Operator):
             self.report({"ERROR"}, f"Could not start Substance Painter: {ex}")
             return {"CANCELLED"}
         what = os.path.basename(project) if project else "a new project from the mesh"
-        self.report({"INFO"}, f"Substance Painter started with {what}. Export with the "
-                              f"'{EXPORT_PRESET}' preset as PNG; Blender reloads the textures")
+        self.report({"INFO"}, f"Substance Painter started with {what}. Press 'Export to "
+                              f"Blender' in Painter's Blender Link panel (or export with the "
+                              f"'{EXPORT_PRESET}' preset as PNG); Blender reloads the textures")
         return {"FINISHED"}
 
 

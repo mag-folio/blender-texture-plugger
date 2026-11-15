@@ -650,8 +650,9 @@ class TEXTUREPLUGGER_OT_edit_scene_in_painter(bpy.types.Operator):
         where = f"part {part + 1} of {count} ({len(objs)} objects)" if count > 1 else f"{len(objs)} object(s)"
         if count > 1 and picked is None:
             where += "; select an object first to open the part it is in"
-        self.report({"INFO"}, f"Substance Painter started with {where}. Export with "
-                              f"the '{workflow.EXPORT_PRESET}' preset as PNG; Blender reloads")
+        self.report({"INFO"}, f"Substance Painter started with {where}. Press 'Export to "
+                              f"Blender' in Painter's Blender Link panel (or export with the "
+                              f"'{workflow.EXPORT_PRESET}' preset as PNG); Blender reloads")
         return {"FINISHED"}
 
 

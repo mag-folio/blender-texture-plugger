@@ -226,7 +226,7 @@ def read_link(path):
 
 def write_link(link_dir, sets, active="", environment=None, exposure=0.0, view=None,
                blend_name="", replace_sets=True, scene=None, tone_mapping=None,
-               lighting_key=None):
+               lighting_key=None, preview=None):
     """Merge new data into the link file (atomic write). Returns its path.
 
     ``sets`` maps a texture set (material) name to
@@ -239,6 +239,11 @@ def write_link(link_dir, sets, active="", environment=None, exposure=0.0, view=N
     baked with.  Other sets keep their own baked environment only while it was
     baked under the same lighting; after a lamp moves they fall back to the new
     map instead of showing the old lighting.
+
+    ``preview`` is Blender's Material Preview lighting (the viewport's studio
+    HDRI, the same for every set): ``{"environment": file, "exposure": ev,
+    "hdri": name}``.  Painter can switch between it and the render lighting.
+    ``{}`` removes it; ``None`` keeps the previous one.
     """
     os.makedirs(link_dir, exist_ok=True)
     path = link_file(link_dir)
@@ -281,6 +286,11 @@ def write_link(link_dir, sets, active="", environment=None, exposure=0.0, view=N
                 new_sets[active]["lighting_key"] = lighting_key
     if view is not None:
         data["view"] = view
+    if preview is not None:
+        if preview.get("environment"):
+            data["preview"] = dict(preview)
+        else:
+            data.pop("preview", None)
     if tone_mapping:
         data["tone_mapping"] = tone_mapping
     # Whole-scene launch: texture size for new texture sets and where to save the
@@ -305,6 +315,9 @@ def referenced_environments(data):
     for info in (data.get("sets") or {}).values():
         if isinstance(info, dict) and info.get("environment"):
             refs.add(info["environment"])
+    prev = data.get("preview")
+    if isinstance(prev, dict) and prev.get("environment"):
+        refs.add(prev["environment"])
     return refs
 
 

@@ -169,7 +169,9 @@ def test(mod):
           s3["Crate"].get("environment") == env_before and s3["Barrel"].get("environment")
           and s3["Barrel"]["environment"] != env_before, s3)
     files = sorted(f for f in os.listdir(os.environ["TP_LINK_DIR"]) if f.startswith("env_"))
-    check("only referenced maps kept on disk", len(files) == 2, files)
+    render = [f for f in files if not f.startswith("env_preview_")]
+    check("only referenced maps kept on disk (2 render + the latest Material Preview)",
+          len(render) == 2 and len(files) == 3, files)
 
     # world + surroundings bake: no crash, emitted world shows up, user scene untouched
     sc = bpy.context.scene
@@ -198,6 +200,7 @@ def test(mod):
     enclosed(mod)
     occluders(mod)
     fingerprint(mod)
+    preview(mod)
 
 
 def _env_mean(path):
@@ -354,6 +357,31 @@ def fingerprint(mod):
     check("turning a lamp changes the key", k3 != k1)
     lamp.data.energy *= 2
     check("lamp strength changes the key", sl.lighting_key(ctx) != k3)
+
+
+def preview(mod):
+    """Material Preview lighting: the studio HDRI, baked and linked for Painter."""
+    sl = mod.scene_link
+    ctx = bpy.context
+    st = sl.preview_settings(ctx)
+    check("headless: default Material Preview HDRI found",
+          st["name"] == sl.DEFAULT_LOOKDEV and st["hdri"] and os.path.isfile(st["hdri"]), st)
+    target = next(o for o in ctx.scene.objects if o.type == "MESH")
+    n_worlds, n_images = len(bpy.data.worlds), len(bpy.data.images)
+    out = os.path.join(TMP, "preview.exr")
+    info = sl.bake_preview(ctx, target, out, 256)
+    mean = _env_mean(out)
+    check("preview map baked from the studio HDRI",
+          info["hdri"] == sl.DEFAULT_LOOKDEV and info["lights"] == 0 and mean > 0.05, (info, mean))
+    check("preview bake leaves no temp world or image",
+          (len(bpy.data.worlds), len(bpy.data.images)) == (n_worlds, n_images),
+          (len(bpy.data.worlds), len(bpy.data.images)))
+    msg, warns = sl.send(ctx, target)
+    data = mod.painter_link.read_link(mod.painter_link.link_file(sl.link_dir()))
+    pv = (data or {}).get("preview") or {}
+    check("send links render and Material Preview lighting",
+          pv.get("hdri") == sl.DEFAULT_LOOKDEV and pv.get("environment") != data.get("environment")
+          and os.path.isfile(os.path.join(sl.link_dir(), pv.get("environment", "?"))), (msg, warns, pv))
 
 
 def main():
