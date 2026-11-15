@@ -163,6 +163,16 @@ Non-Color. Because the add-on writes the textures, the material is wired up stra
    named after the object, even when several objects shared one material or share the same
    mesh. All placeholders go into one shared `textures` folder and all objects are exported
    into one FBX (`<blend name>_scene/`). Running it again reuses what is there.
+
+   **Objects that aren't unwrapped yet are unwrapped first with
+   [Smart Seams](https://github.com/mag-folio/smart-seams)** when that add-on is enabled, so
+   Painter gets clean UVs. An object counts as not unwrapped when it has no UV map, or its UV
+   map is collapsed to a point or a line. Objects that already have UVs are never changed,
+   and a mesh shared by several objects is unwrapped once. Smart Seams uses its own settings
+   (sidebar > Smart Seams). Switch this off with **Unwrap Objects Without UVs** in the Whole
+   Scene box. Without Smart Seams the objects are left as they are (Painter can auto-unwrap
+   them on import) and you get a message naming them. Unwrapping a dense mesh can take a
+   minute; the status bar shows which object is being unwrapped.
 3. Press **Edit Scene in Painter**. Painter opens the whole scene, with one texture set per
    object, the Blender lighting and the object bounds already sent (see Painter Link below).
 4. Use **Solo** in Painter's *Blender Link* panel to work on one object at a time, and
@@ -294,6 +304,7 @@ python tests\test_scaffold.py           # pure-Python Create & Paint scaffolding
 .\tests\run_blender_tests.ps1 -Script adversarial_test.py   # drop path, reload, linked data...
 .\tests\run_blender_tests.ps1 -Script scene_link_test.py   # Painter Link: lighting bake, bounds, view
 .\tests\run_blender_tests.ps1 -Script scene_batch_test.py  # whole scene: unique materials, one FBX
+.\tests\run_blender_tests.ps1 -Script scene_unwrap_test.py # whole scene: Smart Seams unwraps UV-less objects
 python tests\test_painter_link.py       # link file contract, panorama maths, Painter camera maths
 python tests\test_orbit.py              # Painter plugin orbit / zoom maths
 python tests\test_scene_plan.py         # big scenes: texture size, parts, placeholder writer

@@ -21,7 +21,7 @@ import time
 import bpy
 from bpy.props import EnumProperty
 
-from . import node_builder, operators, prefs, scaffold, scene_plan, workflow
+from . import node_builder, operators, prefs, scaffold, scene_plan, uv_unwrap, workflow
 from .operators import _safe
 
 SCENE_KEY = "texture_plugger_scene"
@@ -169,6 +169,7 @@ PART_KEY = "texture_plugger_part"          # 0-based part index of a scene mater
 PARTS_KEY = "texture_plugger_parts"        # number of parts in its scene
 RES_KEY = "texture_plugger_resolution"     # texture size Painter should use for it
 STEP_SECONDS = 0.12                        # work per UI tick of the modal operator
+UNWRAP_STEP = "Unwrapping"                 # status of a slow step: show it before it runs
 
 
 def _limits(context):
@@ -259,8 +260,34 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
             plan.append((ob, i))
             wanted.append(ob.name if n == 1 else f"{ob.name}_{i + 1}")
     names = unique_names(wanted, taken)
-    total = len(plan) + len(objs) + 2
+
+    # Objects without UVs are unwrapped with Smart Seams (when it is installed)
+    # before anything is exported, so Painter gets clean UVs. Objects that
+    # already have UVs are left alone; shared mesh data is unwrapped once.
+    want_unwrap = bool(getattr(settings, "scene_unwrap", True))
+    have_seams = want_unwrap and uv_unwrap.smart_seams_available()
+    to_unwrap, seen_data = [], set()
+    if have_seams:
+        for ob in objs:
+            if (ob.name in skipped or ob.data.name_full in seen_data
+                    or not uv_unwrap.needs_unwrap(ob) or not uv_unwrap.unwrappable(ob)):
+                continue
+            seen_data.add(ob.data.name_full)
+            to_unwrap.append(ob)
+    total = len(to_unwrap) + len(plan) + len(objs) + 2
     done = 0
+    unwrapped, unwrap_failed = 0, set()
+    for ob in to_unwrap:
+        yield done, total, f"{UNWRAP_STEP} {ob.name} with Smart Seams"
+        if uv_unwrap.needs_unwrap(ob):
+            err = uv_unwrap.unwrap_one(context, ob)
+            if err:
+                unwrap_failed.add(ob.data.name_full)
+                messages.append(f"'{ob.name}': Smart Seams could not unwrap it ({err})")
+            else:
+                unwrapped += 1
+        done += 1
+        yield done, total, "Unwrapped with Smart Seams"
 
     created_mats = []
     try:
@@ -321,7 +348,12 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
         yield done, total, "Creating texture sets"
 
     for ob in built_objs:
-        if len(ob.data.uv_layers) == 0:
+        if not uv_unwrap.needs_unwrap(ob) or ob.data.name_full in unwrap_failed:
+            continue
+        if want_unwrap and not have_seams:
+            messages.append(f"'{ob.name}' has no UV map; enable the Smart Seams add-on to "
+                            f"unwrap it automatically (or let Painter auto-unwrap it on import)")
+        else:
             messages.append(f"'{ob.name}' has no UV map; Painter can auto-unwrap it on import")
 
     # Size the scene to this computer and cut it into Painter parts (one when it
@@ -349,6 +381,7 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
     if skipped:
         messages.append("Skipped linked objects: " + ", ".join(skipped))
     return {"folder": folder, "textures": tex_dir, "built": built, "objects": len(objs),
+            "unwrapped": unwrapped,
             "mesh": exported_paths[0] if len(exported_paths) == 1 else (exported_paths or None),
             "parts": len(parts), "resolution": resolution, "sets": n_sets,
             "messages": messages}, None
@@ -368,6 +401,8 @@ def _finish_message(info):
     msg = f"{info['built']} texture set(s) for {info['objects']} object(s)"
     if info.get("parts", 1) > 1:
         msg += f", in {info['parts']} Painter parts"
+    if info.get("unwrapped"):
+        msg += f", {info['unwrapped']} unwrapped with Smart Seams"
     return msg + f" at {info['resolution']} px in {info['folder']}"
 
 
@@ -481,6 +516,8 @@ class TEXTUREPLUGGER_OT_create_scene_sets(bpy.types.Operator):
         try:
             while time.perf_counter() < deadline:
                 done, total, what = next(self._gen)
+                if what.startswith(UNWRAP_STEP):
+                    break                  # show the status before the slow unwrap runs
         except StopIteration as stop:
             self._end(context)
             return self._report_result(stop.value)
@@ -488,9 +525,9 @@ class TEXTUREPLUGGER_OT_create_scene_sets(bpy.types.Operator):
             self._end(context)
             self.report({"ERROR"}, f"Texture Plugger: {ex}")
             return {"CANCELLED"}
-        if not self._progress:
-            self._wm.progress_begin(0, max(1, total))
-            self._progress = True
+        # Begin again every tick: Smart Seams ends the progress bar it shares with us.
+        self._wm.progress_begin(0, max(1, total))
+        self._progress = True
         self._wm.progress_update(done)
         self._status(context, f"Texture Plugger: {what} {done} / {total}  (Esc to stop)")
         return {"RUNNING_MODAL"}

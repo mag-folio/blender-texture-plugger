@@ -96,6 +96,11 @@ class TEXTUREPLUGGER_PG_settings(bpy.types.PropertyGroup):
     create_resolution: EnumProperty(
         name="Size", items=CREATE_RESOLUTION_ITEMS, default="1024",
         description="Placeholder size; Painter overwrites the files at its own export size")
+    scene_unwrap: BoolProperty(
+        name="Unwrap Objects Without UVs", default=True,
+        description="Create Sets for Scene first unwraps every object that has no UVs yet with "
+                    "the Smart Seams add-on (uses its settings). Objects that already have UVs "
+                    "are never changed")
 
 
 for _name, _prop in prefs.option_annotations().items():
