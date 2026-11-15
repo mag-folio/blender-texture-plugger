@@ -215,6 +215,21 @@ def big_scene(mod, batch, s):
         cmd = launched[-1]
         check("saved part project reopened", cmd[-1].endswith(stem + ".spp") and "--mesh" not in cmd, cmd)
         batch._last_launch = 0.0
+        # active object outside the scene (a brushstroke, an empty...) and nothing selected:
+        # the button still finds the scene and opens part 1
+        empty = bpy.data.objects.new("Stroke Holder", None)
+        sc.collection.objects.link(empty)
+        for o in sc.objects:
+            o.select_set(False)
+        bpy.context.view_layer.objects.active = empty
+        res = bpy.ops.texture_plugger.edit_scene_in_painter()
+        cmd = launched[-1]
+        first = plan.part_name(os.path.basename(folder), 0, count)
+        check("scene found without a scene object selected",
+              res == {"FINISHED"} and ("--mesh" in cmd and os.path.basename(cmd[cmd.index("--mesh") + 1]) == first + ".fbx"),
+              (res, cmd))
+        batch._last_launch = 0.0
+        bpy.data.objects.remove(empty)
     finally:
         for o in sc.objects:
             o.select_set(False)

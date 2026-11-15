@@ -497,6 +497,37 @@ def part_of(ob, folder):
     return 0, 1
 
 
+def find_scene_folder(context):
+    """The whole-scene folder this .blend uses, when the selection doesn't say.
+
+    Prefers the scene under the current *Folder* setting, then the one with the
+    most objects. Only folders that still exist on disk count.
+    """
+    counts = {}
+    for ob in context.scene.objects:
+        if ob.type != "MESH":
+            continue
+        for slot in ob.material_slots:
+            f = material_scene(slot.material)
+            if f:
+                counts[f] = counts.get(f, 0) + 1
+                break
+    folders = [f for f in counts if os.path.isdir(f)]
+    if not folders:
+        return ""
+    try:
+        settings = operators.get_settings(context)
+        root = os.path.abspath(bpy.path.abspath((settings.create_root or "").strip()))
+    except Exception:
+        root = ""
+    if root:
+        under = [f for f in folders
+                 if workflow._folder_key(os.path.dirname(f)) == workflow._folder_key(root)]
+        if under:
+            return max(under, key=lambda f: counts[f])
+    return max(folders, key=lambda f: counts[f])
+
+
 def scene_resolution(objs, folder):
     for ob in objs:
         for mat in scene_materials(ob, folder):
@@ -531,6 +562,11 @@ class TEXTUREPLUGGER_OT_edit_scene_in_painter(bpy.types.Operator):
                 picked = ob
                 break
         if not folder or not os.path.isdir(folder):
+            # The active object isn't part of a scene (a brushstroke, an empty, the
+            # floor...): use the scene this file already has.
+            folder = find_scene_folder(context)
+            picked = None
+        if not folder:
             self.report({"WARNING"}, "Create sets for the scene first")
             return {"CANCELLED"}
         if time.time() - _last_launch < 10.0:
@@ -546,7 +582,10 @@ class TEXTUREPLUGGER_OT_edit_scene_in_painter(bpy.types.Operator):
         textures = os.path.join(folder, "textures")
         os.makedirs(textures, exist_ok=True)
         everyone = objects_in_scene(folder)
-        part, count = part_of(picked, folder)
+        if picked is not None:
+            part, count = part_of(picked, folder)
+        else:            # nothing of the scene selected: start with part 1
+            part, count = 0, (part_of(everyone[0], folder)[1] if everyone else 1)
         objs = [o for o in everyone if part_of(o, folder)[0] == part] if count > 1 else everyone
         if not objs:
             objs, part, count = everyone, 0, 1
@@ -581,6 +620,8 @@ class TEXTUREPLUGGER_OT_edit_scene_in_painter(bpy.types.Operator):
             return {"CANCELLED"}
         _last_launch = time.time()
         where = f"part {part + 1} of {count} ({len(objs)} objects)" if count > 1 else f"{len(objs)} object(s)"
+        if count > 1 and picked is None:
+            where += "; select an object first to open the part it is in"
         self.report({"INFO"}, f"Substance Painter started with {where}. Export with "
                               f"the '{workflow.EXPORT_PRESET}' preset as PNG; Blender reloads")
         return {"FINISHED"}
