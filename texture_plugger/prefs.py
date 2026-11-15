@@ -2,7 +2,7 @@
 """Add-on preferences: default options, format priority, editable keyword lists."""
 
 import bpy
-from bpy.props import (BoolProperty, EnumProperty, FloatProperty, StringProperty)
+from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty)
 
 from . import detection
 
@@ -122,6 +122,26 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
     reload_interval: FloatProperty(
         name="Check Interval", default=1.0, min=0.25, max=60.0,
         description="Seconds between checks for changed texture files")
+    send_on_launch: BoolProperty(
+        name="Send Lighting When Opening Painter", default=True,
+        description="Edit in Substance Painter also bakes and sends the lighting, object "
+                    "bounds and view")
+    env_resolution: EnumProperty(
+        name="Lighting Map Size", default="1024",
+        items=(("512", "512 x 256", "Fast"), ("1024", "1024 x 512", "Balanced"),
+               ("2048", "2048 x 1024", "Sharper reflections, slower")),
+        description="Width of the baked environment map")
+    env_samples: IntProperty(
+        name="Lighting Samples", default=64, min=4, max=4096,
+        description="Cycles samples for the lighting bake (denoised)")
+    light_min_size: FloatProperty(
+        name="Min Lamp Size", default=2.0, min=0.25, max=25.0,
+        description="Smallest apparent size (degrees) a lamp gets in the map. Larger is "
+                    "softer and less noisy in Painter")
+    env_surroundings: BoolProperty(
+        name="Include Surroundings", default=True,
+        description="Bake the rest of the scene too (bounce light, reflections, shadows "
+                    "from other objects). Off: only the world and the lamps")
 
     def draw(self, context):
         layout = self.layout
@@ -148,6 +168,13 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         sub = row.row()
         sub.active = self.auto_reload
         sub.prop(self, "reload_interval")
+        box.prop(self, "send_on_launch")
+        grid = box.grid_flow(columns=2, even_columns=True)
+        grid.prop(self, "env_resolution")
+        grid.prop(self, "env_samples")
+        grid.prop(self, "light_min_size")
+        grid.prop(self, "env_surroundings")
+        box.operator("texture_plugger.install_painter_plugin", icon="IMPORT")
 
         box = col.box()
         row = box.row()

@@ -29,4 +29,6 @@ if ($Test) {
     if ($Blender) { $testArgs["Blender"] = $Blender }
     & "$root\tests\run_blender_tests.ps1" @testArgs
     if ($LASTEXITCODE -ne 0) { throw "Blender tests failed" }
+    & "$root\tests\run_blender_tests.ps1" @testArgs -Script scene_link_test.py
+    if ($LASTEXITCODE -ne 0) { throw "Painter link tests failed" }
 }

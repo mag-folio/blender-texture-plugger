@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "texture_plugger"
-version = "1.1.0"
+version = "1.2.0"
 name = "Texture Plugger"
 tagline = "Detect PBR texture maps by filename and wire up the material"
 maintainer = "Texture Plugger contributors"
@@ -14,7 +14,7 @@ blender_version_min = "4.5.0"
 license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
-files = "Read textures, create texture and mesh files in a chosen folder"
+files = "Read textures, write meshes and Painter plugin/lighting files"
 
 [build]
 paths_exclude_pattern = [

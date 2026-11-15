@@ -1,4 +1,4 @@
-# Texture Plugger
+﻿# Texture Plugger
 
 A Blender add-on (Extension format, Blender 4.5 and 5.0+) that hooks PBR texture sets up to a
 Principled BSDF material. It detects each map from its filename and wires everything up
@@ -42,7 +42,7 @@ are Cycles; the panel screenshot is Blender 5.0's Material Preview.
 
 ## Install
 
-1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-1.1.0.zip`.
+1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-1.2.0.zip`.
 2. In Blender go to **Edit > Preferences > Get Extensions**, open the **v** menu (top right),
    choose **Install from Disk...** and pick the zip.
 3. Check that **Texture Plugger** is enabled.
@@ -155,6 +155,70 @@ Non-Color. Because the add-on writes the textures, the material is wired up stra
 - Don't rename the material after creating the set: Painter would export files with the new
   name and the placeholders would not be replaced (the add-on warns you).
 
+### A whole scene at once
+
+1. Select the objects you want to paint (box-select in the viewport or the Outliner).
+   Objects inside groups (parented to empties) and nested collections are included.
+2. Press **Create Sets for Scene**. Every object gets its **own** material and texture set,
+   named after the object, even when several objects shared one material or share the same
+   mesh. All placeholders go into one shared `textures` folder and all objects are exported
+   into one FBX (`<blend name>_scene/`). Running it again reuses what is there.
+3. Press **Edit Scene in Painter**. Painter opens the whole scene, with one texture set per
+   object, the Blender lighting and the object bounds already sent (see Painter Link below).
+4. Use **Solo** in Painter's *Blender Link* panel to work on one object at a time, and
+   export with the **Blender (Principled BSDF)** template as PNG. Every object in Blender
+   updates from that one export.
+
+## Painter Link: Blender lighting, solo and orbit in Painter
+
+Painter has no lights of its own and no way to show one object out of a big scene and
+frame it. Painter Link adds both, through a small Painter plugin the add-on installs for you.
+
+**In Blender:** select the mesh you want to paint and press **Send to Painter** (in the
+*Create & Paint* sub-panel, *Painter Link* box). It sends three things:
+
+- **Lighting.** Painter only lights with an environment map, so the add-on bakes one from
+  the object's position with Cycles. It contains your world and everything around the
+  object (bounce light, reflections and shadows from other objects; the object itself is
+  hidden). Each lamp (sun, point, spot, area) is measured at the object and painted into the
+  map as a small bright disc that gives the same amount of light from the same direction.
+  The map is already turned to Painter's axes and includes your Blender exposure.
+- **Where every object is.** Bounds for each material, which is how Painter names its
+  texture sets.
+- **The view.** Your 3D viewport, or the scene camera when you look through it.
+
+The camera button next to it sends only the view, which is instant. **Edit in Substance
+Painter** sends everything automatically before opening Painter (switch that off with
+*Send when opening Painter*). Map size, samples, minimum lamp size and *Include
+Surroundings* are in the add-on preferences.
+
+**In Painter:** the plugin loads with Painter (restart Painter once after the first send).
+It adds a **Blender Link** panel and a **Texture Plugger** menu:
+
+- **Solo:** shows only one texture set and frames the camera on it. Painter's own Focus Mode
+  is switched on for you. This works with a whole scene loaded. Double-click a set in the panel, or pick it and
+  press *Solo*. While soloing, picking another set in Painter's Texture Set List frames
+  that one. **Show All** leaves solo mode.
+- **Orbit around it:** the ◀ ▲ ▼ ▶ buttons (and *Zoom +/-*) in the panel orbit around the
+  selected object's centre at the current zoom. Alt + left-drag on the object also works;
+  Painter then orbits around the point under the cursor.
+- **Lighting:** the Blender lighting becomes the environment map automatically, and
+  updates each time you press Send to Painter. Every object you sent keeps its own
+  lighting; soloing it switches to that lighting.
+- **Match Blender View:** puts Painter's camera where your Blender view is.
+
+Both apps share the folder `Documents\Adobe\Adobe Substance 3D Painter\texture_plugger_link`
+(the plugin goes into `...\python\startup`). Only maps still in use are kept there.
+
+Notes:
+
+- Blender's default *AgX* view transform and Painter's tone mapping differ, so contrast can
+  look a little different even though the light is the same.
+- Very small lamps are widened to *Min Lamp Size* (2 degrees) so they don't sparkle in
+  Painter; reflections of them are softer than in Cycles.
+- Texture sets are matched by material name. A set that isn't in the link (e.g. renamed)
+  is framed as the whole scene.
+
 ## What gets built
 
 | Map | Wiring | Colour space |
@@ -209,6 +273,10 @@ python tests\test_scaffold.py           # pure-Python Create & Paint scaffolding
 .\tests\run_blender_tests.ps1           # headless Blender test (isolated user dir)
 .\tests\run_blender_tests.ps1 -Legacy   # same, loaded as a legacy add-on
 .\tests\run_blender_tests.ps1 -Script adversarial_test.py   # drop path, reload, linked data...
+.\tests\run_blender_tests.ps1 -Script scene_link_test.py   # Painter Link: lighting bake, bounds, view
+.\tests\run_blender_tests.ps1 -Script scene_batch_test.py  # whole scene: unique materials, one FBX
+python tests\test_painter_link.py       # link file contract, panorama maths, Painter camera maths
+python tests\test_orbit.py              # Painter plugin orbit / zoom maths
 .\tests\run_blender_tests.ps1 -Blender "C:\...\Blender 4.5\blender.exe"
 .\build.ps1 -Test                       # build + validate manifest + all tests
 ```

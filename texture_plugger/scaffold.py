@@ -120,21 +120,24 @@ def write_png(path, width, height, rgb):
     return path
 
 
-def create_files(root, set_name, map_ids, size):
+def create_files(root, set_name, map_ids, size, textures_dir=None):
     """Create the folders and missing placeholders.
 
     Returns ``[(spec, path, created)]`` in ``MAPS`` order.  Existing files are
-    never overwritten.
+    never overwritten.  ``textures_dir`` puts the files in one shared folder
+    (whole-scene projects, where Painter exports every set to a single path).
     """
     paths = set_paths(root, set_name)
-    os.makedirs(paths.textures, exist_ok=True)
-    os.makedirs(paths.mesh_dir, exist_ok=True)
+    tex_dir = textures_dir or paths.textures
+    os.makedirs(tex_dir, exist_ok=True)
+    if not textures_dir:
+        os.makedirs(paths.mesh_dir, exist_ok=True)
     wanted = set(map_ids)
     out = []
     for spec in MAPS:
         if spec.id not in wanted:
             continue
-        path = os.path.join(paths.textures, texture_filename(set_name, spec))
+        path = os.path.join(tex_dir, texture_filename(set_name, spec))
         created = False
         if not os.path.exists(path):
             try:

@@ -330,7 +330,10 @@ def link_set(context, settings, obj, root, wanted, map_ids, size, export=True):
         mat.name = _unique_material_name(mat, wanted)
     set_name = mat.name   # Painter's texture set name
 
-    results = scaffold.create_files(root, set_name, map_ids, size)
+    try:
+        results = scaffold.create_files(root, set_name, map_ids, size)
+    except OSError as ex:
+        return None, f"Could not create the texture files in {root}: {ex}"
     paths = scaffold.set_paths(root, set_name)
     created = sum(1 for _, _, c in results if c)
 
@@ -542,6 +545,8 @@ class TEXTUREPLUGGER_OT_edit_in_painter(bpy.types.Operator):
         if not folder or not os.path.isdir(folder):
             self.report({"WARNING"}, "Create a texture set first")
             return {"CANCELLED"}
+        if mat.get("texture_plugger_scene"):     # part of a whole-scene project
+            return bpy.ops.texture_plugger.edit_scene_in_painter()
         p = prefs.get_prefs(context)
         explicit = bpy.path.abspath(p.painter_path) if p is not None and p.painter_path else ""
         exe = scaffold.find_painter(explicit)
@@ -573,8 +578,21 @@ class TEXTUREPLUGGER_OT_edit_in_painter(bpy.types.Operator):
                     return {"CANCELLED"}
             cmd = scaffold.painter_command(exe, textures, mesh=mesh)
         if mat.name != os.path.basename(os.path.normpath(folder)):
-            self.report({"WARNING"}, f"Material was renamed: Painter will export files "
-                                     f"named '{mat.name}_...', not the placeholders")
+            self.report({"ERROR"}, f"The material was renamed to '{mat.name}': Painter would "
+                                   "export files that Blender is not watching. Rename it back "
+                                   f"to '{os.path.basename(os.path.normpath(folder))}' or press "
+                                   "Create Texture Set again")
+            return {"CANCELLED"}
+        p_send = prefs.get_prefs(context)
+        if obj.type == "MESH" and (p_send is None or p_send.send_on_launch):
+            from . import scene_link
+            try:
+                scene_link.install_plugin()
+                _msg, warns = scene_link.send(context, obj)
+                for w in warns:
+                    self.report({"WARNING"}, w)
+            except Exception as ex:     # lighting is a bonus: still open Painter
+                self.report({"WARNING"}, f"Could not send the lighting to Painter: {ex}")
         try:
             _launch(cmd, cwd=os.path.dirname(exe))
         except OSError as ex:

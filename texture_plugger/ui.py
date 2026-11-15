@@ -168,6 +168,29 @@ def _draw_paint(panel, context):
     if p is not None:
         layout.prop(p, "auto_reload")
 
+    box = layout.box()
+    box.label(text="Whole Scene (one material per object)", icon="SCENE_DATA")
+    row = box.row(align=True)
+    row.scale_y = 1.3
+    op = row.operator("texture_plugger.create_scene_sets", text="Selected", icon="RESTRICT_SELECT_OFF")
+    op.scope = "SELECTED"
+    op = row.operator("texture_plugger.create_scene_sets", text="All Visible", icon="HIDE_OFF")
+    op.scope = "VISIBLE"
+    box.operator("texture_plugger.edit_scene_in_painter", icon="TPAINT_HLT")
+
+    box = layout.box()
+    box.label(text="Painter Link: lighting, solo, view", icon="LIGHT_SUN")
+    row = box.row(align=True)
+    row.scale_y = 1.3
+    row.enabled = obj is not None and obj.type == "MESH"
+    row.operator("texture_plugger.send_to_painter", icon="EXPORT")
+    op = row.operator("texture_plugger.send_to_painter", text="", icon="VIEW_CAMERA")
+    op.lighting = False
+    if p is not None:
+        col = box.column(align=True)
+        col.prop(p, "send_on_launch", text="Send when opening Painter")
+        col.prop(p, "env_surroundings")
+
 
 def _shader_poll(context):
     space = context.space_data
