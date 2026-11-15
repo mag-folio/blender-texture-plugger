@@ -214,7 +214,7 @@ def read_link(path):
 
 
 def write_link(link_dir, sets, active="", environment=None, exposure=0.0, view=None,
-               blend_name="", replace_sets=True):
+               blend_name="", replace_sets=True, scene=None):
     """Merge new data into the link file (atomic write). Returns its path.
 
     ``sets`` maps a texture set (material) name to
@@ -254,6 +254,12 @@ def write_link(link_dir, sets, active="", environment=None, exposure=0.0, view=N
             new_sets[active]["exposure"] = float(exposure)
     if view is not None:
         data["view"] = view
+    # Whole-scene launch: texture size for new texture sets and where to save the
+    # Painter project (one per part). Only meant for the launch that sent it.
+    if scene:
+        data["scene"] = dict(scene)
+    else:
+        data.pop("scene", None)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=1)

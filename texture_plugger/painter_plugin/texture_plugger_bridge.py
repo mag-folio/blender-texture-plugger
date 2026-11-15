@@ -567,6 +567,63 @@ class Bridge:
             except Exception as ex:
                 self.log(f"could not apply lighting: {ex}", warn=True)
         self.refresh_ui()
+        from PySide6 import QtCore
+
+        def setup():
+            try:
+                self.apply_scene_setup()
+            except Exception as ex:
+                self.log(f"scene setup failed: {ex}", warn=True)
+        QtCore.QTimer.singleShot(1500, setup)      # let Painter finish loading the mesh
+
+    def apply_scene_setup(self):
+        """New whole-scene project from Blender: size its texture sets and save it.
+
+        Blender picks a texture size that keeps the whole scene within the
+        computer's memory and a project file per part; both are applied once,
+        to a project that has never been saved, so later choices made in
+        Painter are never overridden.
+        """
+        import substance_painter.project as pj
+        import substance_painter.textureset as ts
+        sc = (self.data or {}).get("scene")
+        if not isinstance(sc, dict) or not self.project_ready():
+            return False
+        try:
+            if pj.file_path():
+                return False
+        except Exception:
+            return False
+        names = self.texture_set_names()
+        linked = match_sets(names, self.sets())
+        if not linked:
+            return False
+        done = []
+        try:
+            res = int(sc.get("resolution") or 0)
+        except (TypeError, ValueError):
+            res = 0
+        if res >= 128:
+            try:
+                todo = [t for t in ts.all_texture_sets()
+                        if t.name() in linked and t.get_resolution().width != res]
+                if todo:
+                    ts.set_resolutions(todo, ts.Resolution(res, res))
+                done.append(f"{len(linked)} texture sets at {res} px")
+            except Exception as ex:
+                self.log(f"could not set the texture size: {ex}", warn=True)
+        proj = sc.get("project")
+        if proj and not os.path.exists(proj):
+            try:
+                pj.save_as(proj)
+                done.append(f"saved as {os.path.basename(proj)}")
+            except Exception as ex:
+                self.log(f"could not save the project: {ex}", warn=True)
+        if sc.get("parts", 1) and int(sc.get("parts", 1)) > 1:
+            done.insert(0, f"part {sc.get('part')} of {sc.get('parts')}")
+        if done:
+            self.log("scene ready: " + ", ".join(done))
+        return True
 
     def _on_project_closing(self, _e):
         self.soloing = False

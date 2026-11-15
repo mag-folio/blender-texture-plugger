@@ -138,6 +138,15 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         name="Min Lamp Size", default=2.0, min=0.25, max=25.0,
         description="Smallest apparent size (degrees) a lamp gets in the map. Larger is "
                     "softer and less noisy in Painter")
+    max_scene_sets: IntProperty(
+        name="Max Texture Sets per Scene", default=50, min=1, max=500,
+        description="Create Sets for Scene refuses to make more texture sets than this. "
+                    "Painter slows down badly with many texture sets, and every set's "
+                    "textures must fit in memory in Blender and Painter")
+    memory_budget: IntProperty(
+        name="Texture Memory Budget (%)", default=40, min=5, max=75, subtype="PERCENTAGE",
+        description="Create Sets for Scene refuses when the painted textures would need "
+                    "more than this share of the computer's memory once Blender shows them")
     env_surroundings: BoolProperty(
         name="Include Surroundings", default=True,
         description="Bake the rest of the scene too (bounce light, reflections, shadows "
@@ -168,6 +177,9 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         sub = row.row()
         sub.active = self.auto_reload
         sub.prop(self, "reload_interval")
+        row = box.row()
+        row.prop(self, "max_scene_sets")
+        row.prop(self, "memory_budget")
         box.prop(self, "send_on_launch")
         grid = box.grid_flow(columns=2, even_columns=True)
         grid.prop(self, "env_resolution")

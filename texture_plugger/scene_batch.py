@@ -21,7 +21,7 @@ import time
 import bpy
 from bpy.props import EnumProperty
 
-from . import node_builder, operators, prefs, scaffold, workflow
+from . import node_builder, operators, prefs, scaffold, scene_plan, workflow
 from .operators import _safe
 
 SCENE_KEY = "texture_plugger_scene"
@@ -165,14 +165,49 @@ def _slot_wants_new_material(slot, folder):
                 and mat.users <= 1 and node_builder.material_is_editable(mat))
 
 
-def create_scene_sets(context, settings, objs, root, map_ids, size):
-    """Returns (info dict, None) or (None, error)."""
+PART_KEY = "texture_plugger_part"          # 0-based part index of a scene material
+PARTS_KEY = "texture_plugger_parts"        # number of parts in its scene
+RES_KEY = "texture_plugger_resolution"     # texture size Painter should use for it
+STEP_SECONDS = 0.12                        # work per UI tick of the modal operator
+
+
+def _limits(context):
+    """(max texture sets per Painter part, memory budget in bytes) from the preferences."""
+    p = prefs.get_prefs(context)
+    max_sets = int(getattr(p, "max_scene_sets", 50)) if p else 50
+    pct = int(getattr(p, "memory_budget", 40)) if p else 40
+    return max(1, max_sets), int(scene_plan.system_memory_bytes() * max(5, min(75, pct)) / 100)
+
+
+def _part_sort_key(ob):
+    """Keep things that belong together (collection, then group/parent) in the same part."""
+    coll = ob.users_collection[0].name if ob.users_collection else ""
+    root = ob
+    while root.parent is not None:
+        root = root.parent
+    return (coll, root.name, ob.name)
+
+
+def scene_materials(ob, folder):
+    key = workflow._folder_key(folder)
+    return [s.material for s in ob.material_slots
+            if s.material is not None and workflow._folder_key(material_scene(s.material)) == key]
+
+
+def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=None):
+    """Generator doing the work of Create Sets for Scene in small steps.
+
+    Yields ``(done, total, what)`` after each small piece of work so the caller
+    can keep Blender responsive; returns ``(info, None)`` or ``(None, error)``
+    as the generator's value.
+    """
+    max_sets, budget = limits or _limits(context)
     folder = os.path.join(root, scene_folder_name(bpy.data.filepath))
     tex_dir = os.path.join(folder, "textures")
-    mesh_path = os.path.join(folder, "mesh", scene_folder_name(bpy.data.filepath) + ".fbx")
+    mesh_dir = os.path.join(folder, "mesh")
     try:
         os.makedirs(tex_dir, exist_ok=True)
-        os.makedirs(os.path.dirname(mesh_path), exist_ok=True)
+        os.makedirs(mesh_dir, exist_ok=True)
     except OSError as ex:
         return None, f"Cannot create the folder {folder}: {ex}"
 
@@ -199,9 +234,10 @@ def create_scene_sets(context, settings, objs, root, map_ids, size):
             plan.append((ob, i))
             wanted.append(ob.name if n == 1 else f"{ob.name}_{i + 1}")
     names = unique_names(wanted, taken)
+    total = len(plan) + len(objs) + 2
+    done = 0
 
     created_mats = []
-    all_ids = tuple(map_ids)
     try:
         for (ob, i), name in zip(plan, names):
             slot = ob.material_slots[i]
@@ -211,9 +247,13 @@ def create_scene_sets(context, settings, objs, root, map_ids, size):
             if mat.name != name:
                 mat.name = name
             slot.material = mat
+            mat[SCENE_KEY] = folder
             if replaced is not None and replaced.users > 0 and replaced.name != name:
                 messages.append(f"'{ob.name}': replaced material '{replaced.name}'")
             created_mats.append((ob, mat))
+            done += 1
+            if done % 25 == 0:
+                yield done, total, "Making materials"
     except Exception:
         for _, mat in created_mats:
             try:
@@ -222,9 +262,24 @@ def create_scene_sets(context, settings, objs, root, map_ids, size):
                 pass
         raise
 
+    # Size the job to this computer: every texture set of the whole scene has to
+    # fit in memory once Blender shows the painted textures.
+    built_objs = [o for o in objs if o.name not in skipped]
+    everyone = {o.name_full: o for o in objects_in_scene(folder)}
+    for o in built_objs:
+        everyone[o.name_full] = o
+    n_sets = sum(max(1, len(scene_materials(o, folder))) for o in everyone.values())
+    resolution = scene_plan.choose_resolution(n_sets, len(map_ids), size, budget)
+    ph = scene_plan.placeholder_size(resolution)
+    if resolution < size:
+        messages.append(f"{n_sets} texture sets at {size} px would need "
+                        f"{scene_plan.describe_bytes(n_sets * scene_plan.texture_bytes(size, len(map_ids)))}"
+                        f" of memory: using {resolution} px so the scene fits on this computer")
+
     opts = operators.build_options(settings)
+    all_ids = tuple(map_ids)
     built = 0
-    for ob in objs:
+    for ob in built_objs:
         for slot in ob.material_slots:
             mat = slot.material
             if mat is None or workflow._folder_key(material_scene(mat)) not in (
@@ -232,7 +287,8 @@ def create_scene_sets(context, settings, objs, root, map_ids, size):
                 continue
             set_name = mat.name
             try:
-                results = scaffold.create_files(root, set_name, all_ids, size, textures_dir=tex_dir)
+                results = scaffold.create_files(root, set_name, all_ids, ph, textures_dir=tex_dir,
+                                               shrink=True)
             except OSError as ex:
                 return None, f"Could not write textures for '{set_name}': {ex}"
             operators.store_known_set(settings, set_name,
@@ -246,23 +302,64 @@ def create_scene_sets(context, settings, objs, root, map_ids, size):
             mat[workflow.PROJECT_KEY] = folder
             mat[SCENE_KEY] = folder
             built += 1
+        done += 1
+        yield done, total, "Creating texture sets"
 
-    for ob in objs:
+    for ob in built_objs:
         if len(ob.data.uv_layers) == 0:
             messages.append(f"'{ob.name}' has no UV map; Painter can auto-unwrap it on import")
 
-    exported, err = export_meshes(context, [o for o in objs if o.name not in skipped], mesh_path)
-    if exported:
-        for ob in objs:
-            for slot in ob.material_slots:
-                if slot.material is not None and material_scene(slot.material):
-                    slot.material[workflow.MESH_KEY] = exported
-    else:
-        messages.append(err)
+    # Parts Painter can handle, keeping collections and groups together.
+    ordered = sorted(everyone.values(), key=_part_sort_key)
+    weights = [max(1, len(scene_materials(o, folder))) for o in ordered]
+    groups = scene_plan.pack_parts(weights, max_sets)
+    stem = os.path.basename(folder)
+    parts = []
+    for p, idx in enumerate(groups):
+        members = [ordered[i] for i in idx]
+        parts.append(members)
+        for o in members:
+            for mat in scene_materials(o, folder):
+                mat[PART_KEY] = p
+                mat[PARTS_KEY] = len(groups)
+                mat[RES_KEY] = resolution
+    total = done + len(parts)
+    exported_paths = []
+    for p, members in enumerate(parts):
+        path = os.path.join(mesh_dir, scene_plan.part_name(stem, p, len(parts)) + ".fbx")
+        exported, err = export_meshes(context, members, path)
+        if exported:
+            exported_paths.append(exported)
+            for o in members:
+                for mat in scene_materials(o, folder):
+                    mat[workflow.MESH_KEY] = exported
+        else:
+            messages.append(err)
+        done += 1
+        yield done, total, "Exporting meshes for Painter"
     if skipped:
         messages.append("Skipped linked objects: " + ", ".join(skipped))
     return {"folder": folder, "textures": tex_dir, "built": built, "objects": len(objs),
-            "mesh": exported, "messages": messages}, None
+            "mesh": exported_paths[0] if len(exported_paths) == 1 else (exported_paths or None),
+            "parts": len(parts), "resolution": resolution, "sets": n_sets,
+            "messages": messages}, None
+
+
+def create_scene_sets(context, settings, objs, root, map_ids, size, limits=None):
+    """Run the whole job at once. Returns (info dict, None) or (None, error)."""
+    gen = iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits)
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        return stop.value
+
+
+def _finish_message(info):
+    msg = f"{info['built']} texture set(s) for {info['objects']} object(s)"
+    if info.get("parts", 1) > 1:
+        msg += f", in {info['parts']} Painter parts"
+    return msg + f" at {info['resolution']} px in {info['folder']}"
 
 
 # --------------------------------------------------------------------------
@@ -277,10 +374,8 @@ class TEXTUREPLUGGER_OT_create_scene_sets(bpy.types.Operator):
 
     scope: EnumProperty(name="Objects", items=_SCOPES, default="SELECTED", options={"SKIP_SAVE"})
 
-    def execute(self, context):
-        return _safe(self, self._execute, context)
-
-    def _execute(self, context):
+    def _prepare(self, context):
+        """Checks shared by execute and invoke. Returns the generator, or a result set."""
         settings = operators.get_settings(context)
         operators.ensure_initialized(context, settings)
         if context.mode != "OBJECT":
@@ -304,19 +399,116 @@ class TEXTUREPLUGGER_OT_create_scene_sets(bpy.types.Operator):
             self.report({"WARNING"}, "No paintable meshes found: select the objects first "
                                      "(hidden and linked objects are skipped)")
             return {"CANCELLED"}
-        info, err = create_scene_sets(context, settings, objs, root, map_ids,
+        return iter_create_scene_sets(context, settings, objs, root, map_ids,
                                       int(settings.create_resolution))
+
+    def _report_result(self, result):
+        info, err = result
         if info is None:
             self.report({"ERROR"}, err)
             return {"CANCELLED"}
         operators._report_all(self, info["messages"], "WARNING")
-        self.report({"INFO"}, f"{info['built']} texture set(s) for {info['objects']} object(s) "
-                              f"in {info['folder']}")
+        self.report({"INFO"}, _finish_message(info))
         return {"FINISHED"}
+
+    def execute(self, context):
+        return _safe(self, self._execute, context)
+
+    def _execute(self, context):
+        gen = self._prepare(context)
+        if isinstance(gen, set):
+            return gen
+        try:
+            while True:
+                next(gen)
+        except StopIteration as stop:
+            return self._report_result(stop.value)
+
+    # Interactive use: the same job in small slices, so Blender keeps drawing,
+    # shows progress and never looks frozen, however big the scene is.
+    def invoke(self, context, event):
+        try:
+            gen = self._prepare(context)
+        except Exception as ex:          # same safety net as _safe
+            self.report({"ERROR"}, f"Texture Plugger: {ex}")
+            return {"CANCELLED"}
+        if isinstance(gen, set):
+            return gen
+        self._gen = gen
+        self._wm = context.window_manager
+        self._timer = self._wm.event_timer_add(0.01, window=context.window)
+        self._progress = False
+        self._wm.modal_handler_add(self)
+        self._status(context, "Texture Plugger: starting...")
+        return {"RUNNING_MODAL"}
+
+    def _status(self, context, text):
+        try:
+            context.workspace.status_text_set(text)
+        except Exception:
+            pass
+
+    def _end(self, context):
+        try:
+            self._wm.event_timer_remove(self._timer)
+        except Exception:
+            pass
+        if self._progress:
+            try:
+                self._wm.progress_end()
+            except Exception:
+                pass
+        self._status(context, None)
+
+    def modal(self, context, event):
+        if event.type == "ESC":
+            self._end(context)
+            self.report({"WARNING"}, "Stopped. Press the button again to finish: what was "
+                                     "already made is kept and reused")
+            return {"CANCELLED"}
+        if event.type != "TIMER":
+            return {"RUNNING_MODAL"}       # keep the scene still while the job runs
+        deadline = time.perf_counter() + STEP_SECONDS
+        try:
+            while time.perf_counter() < deadline:
+                done, total, what = next(self._gen)
+        except StopIteration as stop:
+            self._end(context)
+            return self._report_result(stop.value)
+        except Exception as ex:
+            self._end(context)
+            self.report({"ERROR"}, f"Texture Plugger: {ex}")
+            return {"CANCELLED"}
+        if not self._progress:
+            self._wm.progress_begin(0, max(1, total))
+            self._progress = True
+        self._wm.progress_update(done)
+        self._status(context, f"Texture Plugger: {what} {done} / {total}  (Esc to stop)")
+        return {"RUNNING_MODAL"}
+
+
+def part_of(ob, folder):
+    """(part index, part count) of an object in its scene."""
+    for mat in scene_materials(ob, folder):
+        try:
+            return int(mat.get(PART_KEY, 0)), int(mat.get(PARTS_KEY, 1))
+        except (TypeError, ValueError):
+            pass
+    return 0, 1
+
+
+def scene_resolution(objs, folder):
+    for ob in objs:
+        for mat in scene_materials(ob, folder):
+            try:
+                return int(mat.get(RES_KEY, 0)) or None
+            except (TypeError, ValueError):
+                pass
+    return None
 
 
 class TEXTUREPLUGGER_OT_edit_scene_in_painter(bpy.types.Operator):
-    """Open the whole scene (every object that has a scene texture set) in Substance 3D Painter"""
+    """Open the whole scene (every object that has a scene texture set) in Substance 3D Painter. A big scene opens one part at a time: the part holding the selected object"""
     bl_idname = "texture_plugger.edit_scene_in_painter"
     bl_label = "Edit Scene in Painter"
     bl_options = {"REGISTER"}
@@ -327,6 +519,7 @@ class TEXTUREPLUGGER_OT_edit_scene_in_painter(bpy.types.Operator):
     def _execute(self, context):
         global _last_launch
         folder = ""
+        picked = None
         for ob in [workflow._active_object(context)] + list(context.selected_objects):
             if ob is None or not node_builder.object_supports_material(ob):
                 continue
@@ -335,6 +528,7 @@ class TEXTUREPLUGGER_OT_edit_scene_in_painter(bpy.types.Operator):
                 if folder:
                     break
             if folder:
+                picked = ob
                 break
         if not folder or not os.path.isdir(folder):
             self.report({"WARNING"}, "Create sets for the scene first")
@@ -351,25 +545,31 @@ class TEXTUREPLUGGER_OT_edit_scene_in_painter(bpy.types.Operator):
             return {"CANCELLED"}
         textures = os.path.join(folder, "textures")
         os.makedirs(textures, exist_ok=True)
-        objs = objects_in_scene(folder)
-        project = scaffold.find_project(folder)
+        everyone = objects_in_scene(folder)
+        part, count = part_of(picked, folder)
+        objs = [o for o in everyone if part_of(o, folder)[0] == part] if count > 1 else everyone
+        if not objs:
+            objs, part, count = everyone, 0, 1
+        stem = scene_plan.part_name(os.path.basename(folder), part, count)
+        spp = os.path.join(folder, stem + ".spp")
+        project = spp if os.path.isfile(spp) else (scaffold.find_project(folder) if count <= 1 else None)
         if project:
             cmd = scaffold.painter_command(exe, textures, project=project)
         else:
-            mesh = os.path.join(folder, "mesh", os.path.basename(folder) + ".fbx")
+            mesh = os.path.join(folder, "mesh", stem + ".fbx")
             mesh, err = export_meshes(context, objs, mesh)
             if mesh is None:
                 self.report({"ERROR"}, err)
                 return {"CANCELLED"}
             cmd = scaffold.painter_command(exe, textures, mesh=mesh)
-        target = workflow._active_object(context)
-        if target not in objs:
-            target = objs[0] if objs else None
+        target = picked if picked in objs else (objs[0] if objs else None)
         if target is not None and (p is None or p.send_on_launch):
             from . import scene_link
+            scene = {"resolution": scene_resolution(objs, folder), "project": spp,
+                     "part": part + 1, "parts": count}
             try:
                 scene_link.install_plugin()
-                _m, warns = scene_link.send(context, target)
+                _m, warns = scene_link.send(context, target, scene=scene)
                 for w in warns:
                     self.report({"WARNING"}, w)
             except Exception as ex:
@@ -380,7 +580,8 @@ class TEXTUREPLUGGER_OT_edit_scene_in_painter(bpy.types.Operator):
             self.report({"ERROR"}, f"Could not start Substance Painter: {ex}")
             return {"CANCELLED"}
         _last_launch = time.time()
-        self.report({"INFO"}, f"Substance Painter started with {len(objs)} object(s). Export with "
+        where = f"part {part + 1} of {count} ({len(objs)} objects)" if count > 1 else f"{len(objs)} object(s)"
+        self.report({"INFO"}, f"Substance Painter started with {where}. Export with "
                               f"the '{workflow.EXPORT_PRESET}' preset as PNG; Blender reloads")
         return {"FINISHED"}
 

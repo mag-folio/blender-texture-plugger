@@ -169,6 +169,24 @@ Non-Color. Because the add-on writes the textures, the material is wired up stra
    export with the **Blender (Principled BSDF)** template as PNG. Every object in Blender
    updates from that one export.
 
+**Big scenes are sized to your computer automatically.** Every texture set has to fit in
+memory once Blender shows the painted textures, so:
+
+- **Texture size:** if the scene would need more than about 40% of the computer's memory at
+  the *Size* you picked, a smaller size is used (for example 965 objects on a 32 GB PC get
+  512 px instead of 2048 px). Painter's texture sets are set to that size for you.
+- **Painter parts:** a scene with more than 50 texture sets is split into parts (objects
+  from the same collection and group stay together). **Edit Scene in Painter** opens the
+  part that holds the selected object; select an object elsewhere and press it again for
+  another part. Each part's Painter project is saved for you in the scene folder
+  (`<blend name>_scene_part07.spp`), so pressing the button again reopens your work.
+- **No freezing:** Create Sets for Scene runs in small steps with progress in the status
+  bar; **Esc** stops it, and pressing it again finishes the rest.
+
+Both limits can be changed in the add-on preferences (*Max Texture Sets per Scene*,
+*Texture Memory Budget*). Placeholders are flat colours and are written small; untouched
+placeholders from an earlier run are shrunk too, painted textures are never touched.
+
 ## Painter Link: Blender lighting, solo and orbit in Painter
 
 Painter has no lights of its own and no way to show one object out of a big scene and
@@ -277,6 +295,7 @@ python tests\test_scaffold.py           # pure-Python Create & Paint scaffolding
 .\tests\run_blender_tests.ps1 -Script scene_batch_test.py  # whole scene: unique materials, one FBX
 python tests\test_painter_link.py       # link file contract, panorama maths, Painter camera maths
 python tests\test_orbit.py              # Painter plugin orbit / zoom maths
+python tests\test_scene_plan.py         # big scenes: texture size, parts, placeholder writer
 .\tests\run_blender_tests.ps1 -Blender "C:\...\Blender 4.5\blender.exe"
 .\build.ps1 -Test                       # build + validate manifest + all tests
 ```

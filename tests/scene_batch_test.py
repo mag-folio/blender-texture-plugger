@@ -127,6 +127,8 @@ def test(mod):
     check("visible scope finished", res == {"FINISHED"}, res)
     check("hidden still untouched", len(hidden.material_slots) == 0)
 
+    big_scene(mod, batch, s)
+
     # unwritable root: error, no exception, no half state
     s.create_root = os.path.join(TMP, "sets", "x" * 5, "\0bad")
     try:
@@ -134,6 +136,90 @@ def test(mod):
     except RuntimeError:
         res = {"CANCELLED"}
     check("bad folder cancelled cleanly", res == {"CANCELLED"}, res)
+
+
+def big_scene(mod, batch, s):
+    """A scene too big for the computer is sized down and split into Painter parts."""
+    import json
+    from importlib import import_module
+    plan = import_module(mod.__name__ + ".scene_plan")
+    wf = import_module(mod.__name__ + ".workflow")
+    p = bpy.context.preferences.addons[mod.__name__].preferences
+    sc = bpy.context.scene
+    office = bpy.data.collections.new("Office")
+    sc.collection.children.link(office)
+    desk_mat = bpy.data.materials.new("DeskShared")
+    for i in range(14):
+        o = mesh(f"Desk{i:02d}", (i * 2, 6, 0), coll=office)
+        o.data.materials.append(desk_mat)
+    s.create_root = os.path.join(TMP, "sets_big")
+    s.create_resolution = "2048"
+    real_mem, real_launch = plan.system_memory_bytes, wf._launch
+    saved = (p.max_scene_sets, p.memory_budget, p.painter_path, p.env_samples, p.env_resolution)
+    launched = []
+    try:
+        plan.system_memory_bytes = lambda: 300 * 1024 ** 2      # a "300 MB computer"
+        p.max_scene_sets, p.memory_budget = 5, 40
+        res = bpy.ops.texture_plugger.create_scene_sets(scope="VISIBLE")
+        check("big scene finished (no refusal)", res == {"FINISHED"}, res)
+        desks = [o for o in sc.objects if o.name.startswith("Desk")]
+        mats = [o.active_material for o in desks]
+        check("big scene: every desk has its own material", len({m.name for m in mats}) == len(desks))
+        folder = mats[0]["texture_plugger_scene"]
+        scene_mats = {m.name: m for m in bpy.data.materials
+                      if m.get("texture_plugger_scene") == folder}
+        reso = {m.get(batch.RES_KEY) for m in scene_mats.values()}
+        check("texture size lowered to fit memory", reso == {256}, reso)
+        n_parts = {m.get(batch.PARTS_KEY) for m in scene_mats.values()}
+        check("scene split into parts", len(n_parts) == 1 and next(iter(n_parts)) > 1, n_parts)
+        count = next(iter(n_parts))
+        per_part = {}
+        for m in scene_mats.values():
+            per_part[m[batch.PART_KEY]] = per_part.get(m[batch.PART_KEY], 0) + 1
+        check("no part over the limit", max(per_part.values()) <= 5, per_part)
+        check("parts numbered 0..n-1", sorted(per_part) == list(range(count)), per_part)
+        fbx = sorted(os.listdir(os.path.join(folder, "mesh")))
+        check("one FBX per part", len(fbx) == count and all("_part" in f for f in fbx), fbx)
+        img = next(n.image for n in mats[0].node_tree.nodes if n.type == "TEX_IMAGE" and n.image)
+        check("placeholders written small", tuple(img.size) == (plan.PLACEHOLDER_MAX,) * 2, tuple(img.size))
+        desk_parts = sorted({m[batch.PART_KEY] for m in mats})
+        check("a collection's objects sit in consecutive parts",
+              desk_parts == list(range(desk_parts[0], desk_parts[-1] + 1)), desk_parts)
+
+        # Edit Scene in Painter opens the part of the active object
+        fake = os.path.join(TMP, "Fake Painter.exe")
+        open(fake, "wb").close()
+        p.painter_path, p.env_samples, p.env_resolution = fake, 4, "512"
+        wf._launch = lambda cmd, cwd=None: launched.append(cmd)
+        target = desks[-1]
+        for o in sc.objects:
+            o.select_set(o == target)
+        bpy.context.view_layer.objects.active = target
+        want = target.active_material[batch.PART_KEY]
+        res = bpy.ops.texture_plugger.edit_scene_in_painter()
+        check("edit scene finished", res == {"FINISHED"} and launched, (res, launched))
+        cmd = launched[-1] if launched else []
+        mesh_arg = cmd[cmd.index("--mesh") + 1] if "--mesh" in cmd else ""
+        stem = plan.part_name(os.path.basename(folder), want, count)
+        check("opened the part of the selected object", os.path.basename(mesh_arg) == stem + ".fbx",
+              (mesh_arg, stem))
+        link = json.load(open(os.path.join(os.environ["TP_LINK_DIR"], "blender_link.json")))
+        sc_info = link.get("scene") or {}
+        check("Painter told size, part and project", sc_info.get("resolution") == 256
+              and sc_info.get("part") == want + 1 and sc_info.get("parts") == count
+              and str(sc_info.get("project", "")).endswith(stem + ".spp"), sc_info)
+        # a saved part project is reopened instead of the mesh
+        open(os.path.join(folder, stem + ".spp"), "wb").close()
+        batch._last_launch = 0.0
+        res = bpy.ops.texture_plugger.edit_scene_in_painter()
+        cmd = launched[-1]
+        check("saved part project reopened", cmd[-1].endswith(stem + ".spp") and "--mesh" not in cmd, cmd)
+        batch._last_launch = 0.0
+    finally:
+        for o in sc.objects:
+            o.select_set(False)
+        plan.system_memory_bytes, wf._launch = real_mem, real_launch
+        (p.max_scene_sets, p.memory_budget, p.painter_path, p.env_samples, p.env_resolution) = saved
 
 
 def main():

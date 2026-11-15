@@ -513,7 +513,7 @@ def install_plugin(force=False):
 # High level: send to Painter
 # --------------------------------------------------------------------------
 
-def send(context, target, lighting=True, view=True):
+def send(context, target, lighting=True, view=True, scene=None):
     """Bake/record and write the link file. Returns (message, warnings)."""
     p = prefs.get_prefs(context)
     width = int(getattr(p, "env_resolution", "1024")) if p else 1024
@@ -544,7 +544,8 @@ def send(context, target, lighting=True, view=True):
     blend = os.path.basename(bpy.data.filepath) if bpy.data.filepath else ""
     path = painter_link.write_link(
         folder, sets_payload(context), active=set_name_for(target), environment=env_name,
-        exposure=info["exposure"] if info else 0.0, view=view_data, blend_name=blend)
+        exposure=info["exposure"] if info else 0.0, view=view_data, blend_name=blend,
+        scene=scene)
     painter_link.prune_environments(
         folder, painter_link.referenced_environments(painter_link.read_link(path)))
     parts = []
