@@ -59,6 +59,54 @@ class Resolution(unittest.TestCase):
         self.assertEqual(sp.placeholder_size(16), 16)
 
 
+class Plan(unittest.TestCase):
+    RAM, GPU = int(31.1 * GB), int(11.9 * GB)            # Maggie's PC: 31 GB, RTX 5070 12 GB
+
+    def test_cubicles_open_as_one_painter_project(self):
+        weights = [1] * 897 + [2] * 68                    # 965 objects, 1033 texture sets
+        size, parts = sp.plan_scene(weights, 4, 1024, self.RAM, self.GPU)
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(len(parts[0]), 965)
+        self.assertEqual(size, 256)
+        # and it really fits: Blender's textures in RAM and on the card, Painter's project
+        self.assertTrue(sp.blender_fits(1033, 4, size, self.RAM * 0.4, self.GPU * sp.BLENDER_GPU_SHARE))
+        self.assertGreaterEqual(sp.painter_capacity(size, self.RAM, self.GPU), 1033)
+
+    def test_measured_painter_whole_scene_would_not_fit_at_512(self):
+        # 964 sets at 512 px with one layer used ~5.4 GB of the card's 12 GB in Painter alone
+        self.assertLess(sp.painter_capacity(512, self.RAM, self.GPU), 1033)
+
+    def test_small_scene_keeps_the_size_and_one_part(self):
+        size, parts = sp.plan_scene([1, 1, 2], 4, 2048, self.RAM, self.GPU)
+        self.assertEqual((size, len(parts)), (2048, 1))
+
+    def test_too_big_even_at_the_minimum_is_split(self):
+        weights = [1] * 20000
+        size, parts = sp.plan_scene(weights, 4, 2048, self.RAM, self.GPU)
+        self.assertEqual(size, sp.MIN_RESOLUTION)
+        cap = sp.painter_capacity(size, self.RAM, self.GPU)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(p) <= cap for p in parts))
+
+    def test_a_small_graphics_card_lowers_the_size(self):
+        size_big, _ = sp.plan_scene([1] * 60, 4, 2048, self.RAM, 24 * GB)
+        size_small, _ = sp.plan_scene([1] * 60, 4, 2048, self.RAM, 2 * GB)
+        self.assertLess(size_small, size_big)
+
+    def test_preference_limit_splits_parts(self):
+        _size, parts = sp.plan_scene([1] * 12, 4, 1024, self.RAM, self.GPU, max_sets=5)
+        self.assertEqual([len(p) for p in parts], [4, 4, 4])
+
+    def test_unknown_graphics_card_uses_ram_only(self):
+        size, parts = sp.plan_scene([1] * 10, 4, 1024, self.RAM, None)
+        self.assertEqual((size, len(parts)), (1024, 1))
+
+    def test_graphics_memory_is_read_on_windows(self):
+        if sys.platform == "win32":
+            g = sp.gpu_memory_bytes()
+            self.assertTrue(g is None or g > 256 * 1024 ** 2, g)
+
+
 class Parts(unittest.TestCase):
     def test_small_scene_is_one_part(self):
         self.assertEqual(sp.pack_parts([1, 1, 1], 50), [[0, 1, 2]])

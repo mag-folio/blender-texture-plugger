@@ -139,14 +139,14 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         description="Smallest apparent size (degrees) a lamp gets in the map. Larger is "
                     "softer and less noisy in Painter")
     max_scene_sets: IntProperty(
-        name="Max Texture Sets per Scene", default=50, min=1, max=500,
-        description="Create Sets for Scene refuses to make more texture sets than this. "
-                    "Painter slows down badly with many texture sets, and every set's "
-                    "textures must fit in memory in Blender and Painter")
+        name="Max Texture Sets per Painter Project", default=0, min=0, max=5000,
+        description="0 = automatic: as many as this computer's memory and graphics memory "
+                    "can hold, so a whole scene opens as one Painter project when it fits. "
+                    "A number splits bigger scenes into parts of at most that many sets")
     memory_budget: IntProperty(
         name="Texture Memory Budget (%)", default=40, min=5, max=75, subtype="PERCENTAGE",
-        description="Create Sets for Scene refuses when the painted textures would need "
-                    "more than this share of the computer's memory once Blender shows them")
+        description="Share of the computer's memory the painted textures may use once "
+                    "Blender shows them; the texture size is lowered to stay within it")
     env_surroundings: BoolProperty(
         name="Include Surroundings", default=True,
         description="Bake the rest of the scene too (bounce light, reflections, shadows "

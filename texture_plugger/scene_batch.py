@@ -172,11 +172,37 @@ STEP_SECONDS = 0.12                        # work per UI tick of the modal opera
 
 
 def _limits(context):
-    """(max texture sets per Painter part, memory budget in bytes) from the preferences."""
+    """This computer's memory and graphics memory, and the limits from the preferences."""
     p = prefs.get_prefs(context)
-    max_sets = int(getattr(p, "max_scene_sets", 50)) if p else 50
+    max_sets = int(getattr(p, "max_scene_sets", 0)) if p else 0
     pct = int(getattr(p, "memory_budget", 40)) if p else 40
-    return max(1, max_sets), int(scene_plan.system_memory_bytes() * max(5, min(75, pct)) / 100)
+    return {"ram": scene_plan.system_memory_bytes(), "gpu": scene_plan.gpu_memory_bytes(),
+            "share": max(5, min(75, pct)) / 100.0, "max_sets": max_sets or None}
+
+
+def plan_parts(context, folder, size, n_maps, extra=(), limits=None):
+    """Texture size and Painter parts for every object of the scene in ``folder``.
+
+    Sized to this computer (memory and graphics memory, measured Painter costs):
+    the whole scene opens as one Painter project whenever it can. Stamps the
+    result on the scene's materials and returns ``(size, [[objects of part 1], ...])``.
+    """
+    lim = limits or _limits(context)
+    everyone = {o.name_full: o for o in objects_in_scene(folder)}
+    for o in extra:
+        everyone[o.name_full] = o
+    ordered = sorted(everyone.values(), key=_part_sort_key)
+    weights = [max(1, len(scene_materials(o, folder))) for o in ordered]
+    resolution, groups = scene_plan.plan_scene(weights, n_maps, size, lim["ram"], lim["gpu"],
+                                               lim["share"], lim["max_sets"])
+    parts = [[ordered[i] for i in idx] for idx in groups]
+    for p, members in enumerate(parts):
+        for o in members:
+            for mat in scene_materials(o, folder):
+                mat[PART_KEY] = p
+                mat[PARTS_KEY] = len(parts)
+                mat[RES_KEY] = resolution
+    return resolution, parts
 
 
 def _part_sort_key(ob):
@@ -201,7 +227,6 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
     can keep Blender responsive; returns ``(info, None)`` or ``(None, error)``
     as the generator's value.
     """
-    max_sets, budget = limits or _limits(context)
     folder = os.path.join(root, scene_folder_name(bpy.data.filepath))
     tex_dir = os.path.join(folder, "textures")
     mesh_dir = os.path.join(folder, "mesh")
@@ -262,19 +287,9 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
                 pass
         raise
 
-    # Size the job to this computer: every texture set of the whole scene has to
-    # fit in memory once Blender shows the painted textures.
+    # Placeholders are flat colours: small files whatever the final size.
     built_objs = [o for o in objs if o.name not in skipped]
-    everyone = {o.name_full: o for o in objects_in_scene(folder)}
-    for o in built_objs:
-        everyone[o.name_full] = o
-    n_sets = sum(max(1, len(scene_materials(o, folder))) for o in everyone.values())
-    resolution = scene_plan.choose_resolution(n_sets, len(map_ids), size, budget)
-    ph = scene_plan.placeholder_size(resolution)
-    if resolution < size:
-        messages.append(f"{n_sets} texture sets at {size} px would need "
-                        f"{scene_plan.describe_bytes(n_sets * scene_plan.texture_bytes(size, len(map_ids)))}"
-                        f" of memory: using {resolution} px so the scene fits on this computer")
+    ph = scene_plan.placeholder_size(size)
 
     opts = operators.build_options(settings)
     all_ids = tuple(map_ids)
@@ -309,20 +324,14 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
         if len(ob.data.uv_layers) == 0:
             messages.append(f"'{ob.name}' has no UV map; Painter can auto-unwrap it on import")
 
-    # Parts Painter can handle, keeping collections and groups together.
-    ordered = sorted(everyone.values(), key=_part_sort_key)
-    weights = [max(1, len(scene_materials(o, folder))) for o in ordered]
-    groups = scene_plan.pack_parts(weights, max_sets)
+    # Size the scene to this computer and cut it into Painter parts (one when it
+    # fits), keeping collections and groups together.
+    resolution, parts = plan_parts(context, folder, size, len(map_ids), built_objs, limits)
+    n_sets = sum(len(scene_materials(o, folder)) for part in parts for o in part)
+    if resolution < size:
+        messages.append(f"Texture size {resolution} px (asked {size}) so all {n_sets} texture "
+                        f"sets fit in this computer's memory and graphics memory")
     stem = os.path.basename(folder)
-    parts = []
-    for p, idx in enumerate(groups):
-        members = [ordered[i] for i in idx]
-        parts.append(members)
-        for o in members:
-            for mat in scene_materials(o, folder):
-                mat[PART_KEY] = p
-                mat[PARTS_KEY] = len(groups)
-                mat[RES_KEY] = resolution
     total = done + len(parts)
     exported_paths = []
     for p, members in enumerate(parts):
@@ -497,6 +506,14 @@ def part_of(ob, folder):
     return 0, 1
 
 
+def is_part_project(path, folder):
+    """True for ``<scene>_partNN.spp``: a project of one part of a split scene."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    base = os.path.basename(folder)
+    rest = stem[len(base):] if stem.lower().startswith(base.lower()) else ""
+    return rest.lower().startswith("_part") and rest[5:].isdigit()
+
+
 def find_scene_folder(context):
     """The whole-scene folder this .blend uses, when the selection doesn't say.
 
@@ -581,17 +598,28 @@ class TEXTUREPLUGGER_OT_edit_scene_in_painter(bpy.types.Operator):
             return {"CANCELLED"}
         textures = os.path.join(folder, "textures")
         os.makedirs(textures, exist_ok=True)
-        everyone = objects_in_scene(folder)
+        # Plan again for this computer as it is now: the whole scene in one Painter
+        # project when it fits, otherwise the part holding the selected object.
+        settings = operators.get_settings(context)
+        n_maps = sum(1 for spec in scaffold.MAPS if getattr(settings, "create_" + spec.id, False)) or 4
+        _res, plan = plan_parts(context, folder, int(settings.create_resolution), n_maps)
+        everyone = [o for part in plan for o in part]
+        count = max(1, len(plan))
+        part = 0
         if picked is not None:
-            part, count = part_of(picked, folder)
-        else:            # nothing of the scene selected: start with part 1
-            part, count = 0, (part_of(everyone[0], folder)[1] if everyone else 1)
-        objs = [o for o in everyone if part_of(o, folder)[0] == part] if count > 1 else everyone
+            part = next((i for i, members in enumerate(plan) if picked in members), 0)
+        objs = plan[part] if plan else []
         if not objs:
             objs, part, count = everyone, 0, 1
         stem = scene_plan.part_name(os.path.basename(folder), part, count)
         spp = os.path.join(folder, stem + ".spp")
-        project = spp if os.path.isfile(spp) else (scaffold.find_project(folder) if count <= 1 else None)
+        project = spp if os.path.isfile(spp) else None
+        if project is None and count <= 1:
+            # A project saved by hand in the folder (any name) is reopened, but never
+            # a part project from an earlier, split-up plan of this scene.
+            found = scaffold.find_project(folder)
+            if found and not is_part_project(found, folder):
+                project = found
         if project:
             cmd = scaffold.painter_command(exe, textures, project=project)
         else:

@@ -72,6 +72,108 @@ def choose_resolution(n_sets, n_maps, wanted, budget_bytes, minimum=MIN_RESOLUTI
     return max(res, floor)
 
 
+GPU_BYTES_PER_PIXEL = 4 * 4.0 / 3.0       # Blender viewport texture: RGBA8 + mipmaps
+BLENDER_GPU_SHARE = 0.30                   # of the graphics card, for Blender's textures
+PAINTER_GPU_SHARE = 0.45                   # of the graphics card, for one Painter project
+PAINTER_RAM_SHARE = 0.40                   # of the computer's memory, for one Painter project
+# Measured in Painter 12.2 (964 texture sets, 512 px, one fill layer each):
+# ~5.8 MB of RAM and ~5.6 MB of graphics memory per set per layer = ~22 bytes/px.
+PAINTER_BYTES_PER_PIXEL_LAYER = 22.0
+PAINTER_LAYERS = 1.5                       # headroom: on average a set and a half of layers
+PAINTER_BASE_RAM = int(3.5 * 1024 ** 3)    # Painter itself with a big scene loaded
+PAINTER_BASE_GPU = int(1.0 * 1024 ** 3)
+
+
+def gpu_memory_bytes():
+    """Dedicated memory of the biggest graphics card in bytes, or None if unknown.
+
+    Read from the display adapters' registry keys on Windows (the 64-bit value the
+    driver publishes; the WMI value stops at 4 GB).
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+    except ImportError:
+        return None
+    best = 0
+    base = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base)
+    except OSError:
+        return None
+    try:
+        i = 0
+        while True:
+            try:
+                sub = winreg.EnumKey(root, i)
+            except OSError:
+                break
+            i += 1
+            try:
+                with winreg.OpenKey(root, sub) as k:
+                    for name in ("HardwareInformation.qwMemorySize", "HardwareInformation.MemorySize"):
+                        try:
+                            val, typ = winreg.QueryValueEx(k, name)
+                        except OSError:
+                            continue
+                        if isinstance(val, bytes):
+                            val = int.from_bytes(val[:8], "little")
+                        best = max(best, int(val))
+            except OSError:
+                continue
+    finally:
+        winreg.CloseKey(root)
+    return best or None
+
+
+def blender_fits(n_sets, n_maps, size, ram_budget, gpu_budget):
+    """Can Blender show every texture of the scene at ``size`` px?"""
+    pixels = n_sets * max(0, n_maps) * size * size
+    if pixels * BYTES_PER_PIXEL > ram_budget:
+        return False
+    return gpu_budget is None or pixels * GPU_BYTES_PER_PIXEL <= gpu_budget
+
+
+def painter_set_bytes(size):
+    return size * size * PAINTER_BYTES_PER_PIXEL_LAYER * PAINTER_LAYERS
+
+
+def painter_capacity(size, ram_bytes, gpu_bytes=None):
+    """Texture sets one Painter project can hold at ``size`` px on this computer."""
+    per = painter_set_bytes(size)
+    room = ram_bytes * PAINTER_RAM_SHARE - PAINTER_BASE_RAM
+    if gpu_bytes:
+        room = min(room, gpu_bytes * PAINTER_GPU_SHARE - PAINTER_BASE_GPU)
+    return max(1, int(room // per)) if room > 0 else 1
+
+
+def plan_scene(weights, n_maps, wanted, ram_bytes, gpu_bytes=None, ram_share=0.40,
+               max_sets=None, minimum=MIN_RESOLUTION):
+    """Texture size and Painter parts for a whole scene.
+
+    ``weights`` are texture sets per object, in the order parts should follow.
+    The size is the largest power of two <= ``wanted`` (and >= ``minimum``) at which
+    Blender can show every texture; it goes further down (not below ``minimum``)
+    while that lets the whole scene open in Painter as one project. Returns
+    ``(size, parts)`` with ``parts`` a list of index lists.
+    """
+    n_sets = sum(max(1, int(w)) for w in weights)
+    gpu_budget = gpu_bytes * BLENDER_GPU_SHARE if gpu_bytes else None
+    wanted = max(1, int(wanted))
+    size = 1 << (wanted.bit_length() - 1)
+    floor = min(size, max(1, int(minimum)))
+    while size > floor and not blender_fits(n_sets, n_maps, size, ram_bytes * ram_share, gpu_budget):
+        size //= 2
+    cap = painter_capacity(size, ram_bytes, gpu_bytes)
+    while size > floor and n_sets > cap:
+        size //= 2
+        cap = painter_capacity(size, ram_bytes, gpu_bytes)
+    if max_sets:
+        cap = min(cap, int(max_sets))
+    return size, pack_parts(weights, cap)
+
+
 def placeholder_size(resolution):
     return max(1, min(int(resolution), PLACEHOLDER_MAX))
 

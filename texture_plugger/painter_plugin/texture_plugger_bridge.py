@@ -197,6 +197,16 @@ def match_sets(painter_names, link_sets):
     return out
 
 
+def ts_name(texture_set):
+    """A Texture Set's name on any Painter version.
+
+    Painter 12 turned ``name()`` into a property; calling it still works but logs a
+    deprecation warning every time (thousands a second with a big scene).
+    """
+    n = texture_set.name
+    return str(n) if isinstance(n, str) else n()
+
+
 def default_link_dir(plugin_file=__file__):
     """<Painter user folder>/texture_plugger_link (plugin sits in python/startup)."""
     env = os.environ.get("TP_LINK_DIR")
@@ -265,14 +275,14 @@ class Bridge:
     def texture_set_names(self):
         import substance_painter.textureset as ts
         try:
-            return [t.name() for t in ts.all_texture_sets()]
+            return [ts_name(t) for t in ts.all_texture_sets()]
         except Exception:
             return []
 
     def active_set_name(self):
         import substance_painter.textureset as ts
         try:
-            return ts.get_active_stack().material().name()
+            return ts_name(ts.get_active_stack().material())
         except Exception:
             return None
 
@@ -606,7 +616,7 @@ class Bridge:
         if res >= 128:
             try:
                 todo = [t for t in ts.all_texture_sets()
-                        if t.name() in linked and t.get_resolution().width != res]
+                        if ts_name(t) in linked and t.get_resolution().width != res]
                 if todo:
                     ts.set_resolutions(todo, ts.Resolution(res, res))
                 done.append(f"{len(linked)} texture sets at {res} px")

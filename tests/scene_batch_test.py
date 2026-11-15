@@ -109,6 +109,8 @@ def test(mod):
     imgs = [i for i in bpy.data.images if i.get("texture_plugger_watch") is not None or
             os.path.abspath(bpy.path.abspath(i.filepath)).startswith(os.path.abspath(tex))]
     check("images point into the shared folder", len(imgs) >= len(allobs), len(imgs))
+    check("a small scene is one Painter project",
+          {m.get("texture_plugger_parts") for m in mats} == {1}, [m.get("texture_plugger_parts") for m in mats])
 
     # idempotent: run again, nothing multiplies
     before = sorted(m.name for m in bpy.data.materials)
@@ -154,11 +156,12 @@ def big_scene(mod, batch, s):
         o.data.materials.append(desk_mat)
     s.create_root = os.path.join(TMP, "sets_big")
     s.create_resolution = "2048"
-    real_mem, real_launch = plan.system_memory_bytes, wf._launch
+    real_mem, real_launch, real_gpu = plan.system_memory_bytes, wf._launch, plan.gpu_memory_bytes
     saved = (p.max_scene_sets, p.memory_budget, p.painter_path, p.env_samples, p.env_resolution)
     launched = []
     try:
         plan.system_memory_bytes = lambda: 300 * 1024 ** 2      # a "300 MB computer"
+        plan.gpu_memory_bytes = lambda: None
         p.max_scene_sets, p.memory_budget = 5, 40
         res = bpy.ops.texture_plugger.create_scene_sets(scope="VISIBLE")
         check("big scene finished (no refusal)", res == {"FINISHED"}, res)
@@ -230,10 +233,27 @@ def big_scene(mod, batch, s):
               (res, cmd))
         batch._last_launch = 0.0
         bpy.data.objects.remove(empty)
+
+        # on a computer where the scene fits, the whole scene opens as one project,
+        # and a leftover part project from the split plan is not reopened by mistake
+        plan.system_memory_bytes, plan.gpu_memory_bytes = real_mem, real_gpu
+        p.max_scene_sets = 0
+        for o in sc.objects:
+            o.select_set(o.type == "MESH")
+        bpy.context.view_layer.objects.active = desks[0]
+        res = bpy.ops.texture_plugger.edit_scene_in_painter()
+        cmd = launched[-1]
+        mesh_arg = cmd[cmd.index("--mesh") + 1] if "--mesh" in cmd else ""
+        check("whole scene opens as one project (old part project ignored)",
+              res == {"FINISHED"} and os.path.basename(mesh_arg) == os.path.basename(folder) + ".fbx",
+              (res, cmd))
+        check("every scene object in that project",
+              {m.get(batch.PARTS_KEY) for m in bpy.data.materials if m.get("texture_plugger_scene") == folder} == {1})
+        batch._last_launch = 0.0
     finally:
         for o in sc.objects:
             o.select_set(False)
-        plan.system_memory_bytes, wf._launch = real_mem, real_launch
+        plan.system_memory_bytes, wf._launch, plan.gpu_memory_bytes = real_mem, real_launch, real_gpu
         (p.max_scene_sets, p.memory_budget, p.painter_path, p.env_samples, p.env_resolution) = saved
 
 
