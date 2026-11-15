@@ -11,6 +11,10 @@ import array
 
 import bpy
 
+# Stamped on a mesh after Smart Seams unwrapped it: its vertex/edge/face counts,
+# so "All Objects" doesn't redo it on every run but does after the mesh changes.
+STAMP_KEY = "texture_plugger_smart_seams"
+
 # Coordinates closer than this count as the same point (a collapsed UV map).
 _EPS = 1e-6
 
@@ -44,6 +48,45 @@ def needs_unwrap(ob):
     return (max(us) - min(us) < _EPS) or (max(vs) - min(vs) < _EPS)
 
 
+def _signature(me):
+    return f"{len(me.vertices)}/{len(me.edges)}/{len(me.polygons)}"
+
+
+def is_optimized(ob):
+    """True when Smart Seams already unwrapped this mesh as it is now."""
+    me = ob.data
+    try:
+        return me.get(STAMP_KEY) == _signature(me) and not needs_unwrap(ob)
+    except Exception:
+        return False
+
+
+def _snapshot(me):
+    """Active UV coordinates and seams, to put back if Smart Seams fails part way."""
+    uv = me.uv_layers.active
+    co = None
+    if uv is not None:
+        co = array.array("f", bytes(8 * len(me.loops)))
+        uv.data.foreach_get("uv", co)
+    seams = array.array("b", bytes(len(me.edges)))
+    me.edges.foreach_get("use_seam", seams)
+    return (uv.name if uv is not None else None, co, seams)
+
+
+def _restore(me, snap):
+    name, co, seams = snap
+    try:
+        uv = me.uv_layers.get(name) if name else None
+        if uv is not None and co is not None and len(co) == 2 * len(me.loops):
+            me.uv_layers.active = uv
+            uv.data.foreach_set("uv", co)
+        if len(seams) == len(me.edges):
+            me.edges.foreach_set("use_seam", seams)
+        me.update()
+    except Exception:
+        pass
+
+
 def unwrappable(ob):
     """Smart Seams can only change meshes stored in this file."""
     for idb in (ob, ob.data):
@@ -64,6 +107,7 @@ def unwrap_one(context, ob):
     prev_selected = [o for o in vl.objects if o.select_get()]
     me = ob.data
     had_layers = len(me.uv_layers) > 0
+    snap = _snapshot(me)
     err = None
     try:
         for o in prev_selected:
@@ -89,9 +133,14 @@ def unwrap_one(context, ob):
             pass
     if err is None and needs_unwrap(ob):
         err = getattr(context.scene.smart_seams, "last_message", "") or "no UVs were made"
-    if err is not None and not had_layers:
-        # Smart Seams adds the UV map before solving: don't leave a half-made one
-        # behind, so the object honestly has no UVs and is retried next time.
-        while me.uv_layers:
-            me.uv_layers.remove(me.uv_layers[0])
-    return err
+    if err is not None:
+        if not had_layers:
+            # Smart Seams adds the UV map before solving: don't leave a half-made one
+            # behind, so the object honestly has no UVs and is retried next time.
+            while me.uv_layers:
+                me.uv_layers.remove(me.uv_layers[0])
+        else:
+            _restore(me, snap)          # keep the UVs it had
+        return err
+    me[STAMP_KEY] = _signature(me)
+    return None

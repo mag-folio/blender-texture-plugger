@@ -107,6 +107,8 @@ def test(mod):
     seams.register()
     try:
         check("smart seams detected", uvu.smart_seams_available())
+        check("default mode is All Objects", s.scene_unwrap_mode == "ALL", s.scene_unwrap_mode)
+        s.scene_unwrap_mode = "MISSING"
         bare, dup, kept, flat = build_scene()
         kept_before = uvs(kept)
         sel_before = sorted(o.name for o in bpy.context.selected_objects)
@@ -141,22 +143,41 @@ def test(mod):
         for o in imported:
             bpy.data.objects.remove(o, do_unlink=True)
 
+        # 3. All Objects: existing UVs are re-unwrapped too, once.
+        s.scene_unwrap_mode = "ALL"
+        bare, dup, kept, flat = build_scene()
+        kept_before = uvs(kept)
+        info, err = run(batch, s, batch.collect_targets(bpy.context, "SELECTED"))
+        check("ALL: batch ok", info is not None, err)
+        check("ALL: three meshes unwrapped", info and info.get("unwrapped") == 3,
+              info and info.get("unwrapped"))
+        check("ALL: existing UVs re-unwrapped", uvs(kept) != kept_before)
+        check("ALL: meshes stamped", all(uvu.is_optimized(o) for o in (bare, kept, flat)))
+        kept_after = uvs(kept)
+        info, err = run(batch, s, batch.collect_targets(bpy.context, "SELECTED"))
+        check("ALL: second run doesn't redo them", info and info.get("unwrapped") == 0,
+              info and info.get("unwrapped"))
+        check("ALL: second run keeps UVs", uvs(kept) == kept_after)
+
         # Smart Seams fails on an object: reported, no half-made UV map left, others go on.
         pipeline = importlib.import_module("smart_seams.core.pipeline")
         real_solve = pipeline.solve_seams
 
         def boom(obj, opts):
-            if obj.name == "Bare":
+            if obj.name in ("Bare", "Kept"):
                 raise ValueError("solver blew up")
             return real_solve(obj, opts)
 
         pipeline.solve_seams = boom
         try:
             bare, dup, kept, flat = build_scene()
+            kept_before = uvs(kept)
             info, err = run(batch, s, batch.collect_targets(bpy.context, "SELECTED"))
         finally:
             pipeline.solve_seams = real_solve
         check("failed unwrap: batch still finishes", info is not None, err)
+        check("failed re-unwrap keeps the old UVs", uvs(kept) == kept_before)
+        check("failed re-unwrap not stamped", not kept.data.get(uvu.STAMP_KEY))
         if info is not None:
             check("failed unwrap not counted", info.get("unwrapped") == 1, info.get("unwrapped"))
             check("failed unwrap reported",
@@ -167,11 +188,30 @@ def test(mod):
         check("other object still unwrapped", not uvu.needs_unwrap(flat))
         check("still object mode after failure", bpy.context.mode == "OBJECT", bpy.context.mode)
 
-        # Toggle off: no unwrapping even with Smart Seams installed.
+        # All Objects never re-unwraps an object whose textures are painted.
+        s.scene_unwrap_mode = "MISSING"
         bare, dup, kept, flat = build_scene()
-        s.scene_unwrap = False
         info, err = run(batch, s, batch.collect_targets(bpy.context, "SELECTED"))
-        s.scene_unwrap = True
+        scaffold = importlib.import_module(mod.__name__ + ".scaffold")
+        spec = scaffold.MAPS_BY_ID["base_color"]
+        painted = os.path.join(info["textures"], scaffold.texture_filename(kept.active_material.name, spec))
+        os.remove(painted)
+        scaffold.write_png(painted, 8, 8, (200, 30, 30))          # "painted" in Painter
+        kept_before = uvs(kept)
+        s.scene_unwrap_mode = "ALL"
+        info, err = run(batch, s, batch.collect_targets(bpy.context, "SELECTED"))
+        check("painted: UVs kept", uvs(kept) == kept_before)
+        check("painted: reported", info and any("already painted" in m and "Kept" in m
+                                                 for m in info["messages"]), info and info["messages"])
+        check("painted: others already done, not redone", info and info.get("unwrapped") == 0
+              and uvu.is_optimized(bare) and uvu.is_optimized(flat),
+              info and info.get("unwrapped"))
+
+        # Off: no unwrapping even with Smart Seams installed.
+        bare, dup, kept, flat = build_scene()
+        s.scene_unwrap_mode = "NONE"
+        info, err = run(batch, s, batch.collect_targets(bpy.context, "SELECTED"))
+        s.scene_unwrap_mode = "ALL"
         check("toggle off leaves UVs alone", info and not info.get("unwrapped")
               and not bare.data.uv_layers, info and info.get("unwrapped"))
     finally:

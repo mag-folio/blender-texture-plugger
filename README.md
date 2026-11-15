@@ -164,15 +164,23 @@ Non-Color. Because the add-on writes the textures, the material is wired up stra
    mesh. All placeholders go into one shared `textures` folder and all objects are exported
    into one FBX (`<blend name>_scene/`). Running it again reuses what is there.
 
-   **Objects that aren't unwrapped yet are unwrapped first with
+   **Every object is unwrapped first with
    [Smart Seams](https://github.com/mag-folio/smart-seams)** when that add-on is enabled, so
-   Painter gets clean UVs. An object counts as not unwrapped when it has no UV map, or its UV
-   map is collapsed to a point or a line. Objects that already have UVs are never changed,
-   and a mesh shared by several objects is unwrapped once. Smart Seams uses its own settings
-   (sidebar > Smart Seams). Switch this off with **Unwrap Objects Without UVs** in the Whole
-   Scene box. Without Smart Seams the objects are left as they are (Painter can auto-unwrap
-   them on import) and you get a message naming them. Unwrapping a dense mesh can take a
-   minute; the status bar shows which object is being unwrapped.
+   Painter gets clean UVs. The **Unwrap** setting in the Whole Scene box chooses:
+   - **All Objects** (default): objects that already have UVs are re-unwrapped too. Two
+     exceptions: an object whose texture set has already been painted keeps its UVs (new
+     UVs would scramble the painting; you get a message naming them), and a mesh Smart Seams
+     already unwrapped isn't redone on the next press unless its geometry changed. So
+     pressing the button again, or after Esc, carries on where it stopped.
+   - **Only Without UVs**: only objects with no UV map, or one collapsed to a point or a
+     line. Existing UVs are never changed.
+   - **Off**: nothing is unwrapped.
+
+   A mesh shared by several objects is unwrapped once. Smart Seams uses its own settings
+   (sidebar > Smart Seams). If it fails on an object, that object keeps the UVs it had and
+   you get a message. Without Smart Seams the objects are left as they are (Painter can
+   auto-unwrap them on import) and you get a message naming them. Unwrapping a dense mesh
+   can take a minute; the status bar shows which object is being unwrapped.
 3. Press **Edit Scene in Painter**. Painter opens the whole scene, with one texture set per
    object, the Blender lighting and the object bounds already sent (see Painter Link below).
 4. Use **Solo** in Painter's *Blender Link* panel to work on one object at a time, and

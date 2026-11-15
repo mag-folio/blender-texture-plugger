@@ -215,6 +215,18 @@ def _part_sort_key(ob):
     return (coll, root.name, ob.name)
 
 
+def painted_sets(ob, folder, tex_dir):
+    """Names of the object's scene texture sets that have a painted (not placeholder) map."""
+    out = []
+    for mat in scene_materials(ob, folder):
+        for spec in scaffold.MAPS:
+            path = os.path.join(tex_dir, scaffold.texture_filename(mat.name, spec))
+            if os.path.isfile(path) and not scaffold.is_untouched_placeholder(path, spec.rgb):
+                out.append(mat.name)
+                break
+    return out
+
+
 def scene_materials(ob, folder):
     key = workflow._folder_key(folder)
     return [s.material for s in ob.material_slots
@@ -261,31 +273,49 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
             wanted.append(ob.name if n == 1 else f"{ob.name}_{i + 1}")
     names = unique_names(wanted, taken)
 
-    # Objects without UVs are unwrapped with Smart Seams (when it is installed)
-    # before anything is exported, so Painter gets clean UVs. Objects that
-    # already have UVs are left alone; shared mesh data is unwrapped once.
-    want_unwrap = bool(getattr(settings, "scene_unwrap", True))
+    # Objects are unwrapped with Smart Seams (when it is installed) before
+    # anything is exported, so Painter gets clean UVs. "All Objects" redoes
+    # existing UVs too, except where textures are already painted (new UVs would
+    # scramble them) or Smart Seams already did this mesh. Shared meshes once.
+    mode = getattr(settings, "scene_unwrap_mode", "ALL")
+    want_unwrap = mode != "NONE"
     have_seams = want_unwrap and uv_unwrap.smart_seams_available()
-    to_unwrap, seen_data = [], set()
+    to_unwrap, seen_data, kept_painted = [], set(), []
     if have_seams:
+        users = {}
+        for o in bpy.data.objects:
+            if o.type == "MESH" and o.data is not None:
+                users.setdefault(o.data.name_full, []).append(o)
         for ob in objs:
-            if (ob.name in skipped or ob.data.name_full in seen_data
-                    or not uv_unwrap.needs_unwrap(ob) or not uv_unwrap.unwrappable(ob)):
+            key = ob.data.name_full
+            if (ob.name in skipped or key in seen_data or len(ob.data.polygons) == 0
+                    or not uv_unwrap.unwrappable(ob)):
                 continue
-            seen_data.add(ob.data.name_full)
+            if not uv_unwrap.needs_unwrap(ob):
+                if mode != "ALL" or uv_unwrap.is_optimized(ob):
+                    continue
+                if any(painted_sets(u, folder, tex_dir) for u in users.get(key, [ob])):
+                    kept_painted.append(ob.name)
+                    seen_data.add(key)
+                    continue
+            seen_data.add(key)
             to_unwrap.append(ob)
+    if kept_painted:
+        shown = ", ".join(kept_painted[:8]) + (" ..." if len(kept_painted) > 8 else "")
+        messages.append(f"Kept the UVs of {len(kept_painted)} object(s) whose textures are "
+                        f"already painted (new UVs would scramble them): {shown}")
     total = len(to_unwrap) + len(plan) + len(objs) + 2
     done = 0
     unwrapped, unwrap_failed = 0, set()
     for ob in to_unwrap:
-        yield done, total, f"{UNWRAP_STEP} {ob.name} with Smart Seams"
-        if uv_unwrap.needs_unwrap(ob):
-            err = uv_unwrap.unwrap_one(context, ob)
-            if err:
-                unwrap_failed.add(ob.data.name_full)
-                messages.append(f"'{ob.name}': Smart Seams could not unwrap it ({err})")
-            else:
-                unwrapped += 1
+        yield done, total, (f"{UNWRAP_STEP} {ob.name} with Smart Seams "
+                            f"({done + 1}/{len(to_unwrap)})")
+        err = uv_unwrap.unwrap_one(context, ob)
+        if err:
+            unwrap_failed.add(ob.data.name_full)
+            messages.append(f"'{ob.name}': Smart Seams could not unwrap it ({err})")
+        else:
+            unwrapped += 1
         done += 1
         yield done, total, "Unwrapped with Smart Seams"
 
