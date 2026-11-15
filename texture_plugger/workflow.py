@@ -250,6 +250,7 @@ def _timer():
         p = prefs.get_prefs()
         if p is not None:
             interval = max(0.25, float(p.reload_interval))
+        prune_registry()
         if p is None or p.auto_reload:
             check_reload()
     except Exception as ex:
@@ -332,6 +333,10 @@ def link_set(context, settings, obj, root, wanted, map_ids, size, export=True):
         msgs.append(f"'{obj.name}' has several materials; Painter makes a texture set "
                     f"per material, only '{set_name}' was plugged in")
 
+    # One link per object slot: forget the folder this slot pointed at before.
+    for key, lk in list(_registry.items()):
+        if lk.obj_name == obj.name and lk.slot == obj.active_material_index:
+            del _registry[key]
     _registry[_folder_key(paths.folder)] = _Link(
         folder=paths.folder, obj_name=obj.name, slot=obj.active_material_index,
         set_name=set_name, root=root, map_ids=tuple(map_ids), size=size)
@@ -341,6 +346,16 @@ def link_set(context, settings, obj, root, wanted, map_ids, size, export=True):
 
 def _linked_folders():
     return {_folder_key(material_project(m)) for m in bpy.data.materials} - {""}
+
+
+def prune_registry():
+    """Forget links no material carries any more (relinked, purged, deleted).
+
+    Runs on the timer, i.e. after the undo handler had its chance to repair.
+    """
+    linked = _linked_folders()
+    for key in [k for k in _registry if k not in linked]:
+        del _registry[key]
 
 
 def sync_registry():

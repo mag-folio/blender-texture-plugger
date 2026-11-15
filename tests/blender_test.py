@@ -970,6 +970,25 @@ def test_undo_cannot_break_link(module):
     res = run_op(bpy.ops.texture_plugger.unlink_set)
     check("unlink without a link -> CANCELLED", res[0] == "CANCELLED", res)
 
+    # Creating again under another name moves the link; the old one must not come back.
+    obj2 = new_cube("Relink", (3, 50, 0))
+    select_only(obj2)
+    bpy.ops.texture_plugger.create_set(directory=root, name="RelinkA")
+    bpy.ops.texture_plugger.create_set(directory=root, name="RelinkB")
+    mat2 = obj2.active_material
+    check("second create moves the link", mat2.name == "RelinkB"
+          and wf.material_project(mat2) == os.path.join(root, "RelinkB"))
+    check("old link is not restored", wf.heal() == [] and wf.heal() == []
+          and obj2.active_material.name == "RelinkB", obj2.active_material.name)
+
+    # Linked material swapped out and purged: the timer forgets the link.
+    swapped = bpy.data.materials.new("RelinkSwapped")
+    obj2.active_material = swapped
+    bpy.data.materials.remove(mat2)
+    wf.prune_registry()
+    check("purged link is forgotten", wf.heal() == [] and obj2.active_material == swapped
+          and swapped.name == "RelinkSwapped" and not wf.material_project(swapped))
+
 
 def test_disable_enable(module):
     print("\n[disable / re-enable]")
