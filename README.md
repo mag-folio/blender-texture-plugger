@@ -138,6 +138,11 @@ Non-Color. Because the add-on writes the textures, the material is wired up stra
   You can switch it off and change the interval, and set the **Painter path**, in
   **Edit > Preferences > Add-ons > Texture Plugger**. The **Reload Textures** button in
   the panel reloads everything right away. **Open Folder** shows the set folder.
+- **Works with Brushstroke Tools.** Brushstrokes are separate objects with their own
+  material, so they render on top of the Painter textures. When a brushstrokes object is
+  active, the Create & Paint buttons act on the mesh the strokes sit on. To colour the
+  strokes from the Painter texture, pick the set's Base Color image as the brush
+  material's colour texture; it then updates on every Painter export too.
 - **Undo can't break the link.** If you press Ctrl+Z past the point where the set was
   created, the add-on puts the material, its textures and the folder link straight back
   (the files on disk were never touched). To really disconnect a material from its set

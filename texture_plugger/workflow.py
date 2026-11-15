@@ -37,9 +37,31 @@ _launch = subprocess.Popen
 # Helpers
 # --------------------------------------------------------------------------
 
+def surface_of(obj):
+    """Surface mesh behind a Brushstroke Tools brushstrokes / flow object, or None.
+
+    Brushstroke Tools leaves its own curves object active; the texture set
+    belongs to the mesh those strokes sit on.
+    """
+    if obj is None:
+        return None
+    try:
+        surf = obj.get("BSBST_surface_object")
+        if surf is None:
+            for o in bpy.data.objects:
+                if o.get("BSBST_flow_object") == obj:
+                    surf = o.get("BSBST_surface_object") or obj.parent
+                    break
+    except Exception:
+        return None
+    return surf if isinstance(surf, bpy.types.Object) else None
+
+
 def _active_object(context):
+    """The object Create & Paint works on: the active object, or its surface mesh."""
     vl = getattr(context, "view_layer", None)
-    return vl.objects.active if vl is not None else None
+    obj = vl.objects.active if vl is not None else None
+    return surface_of(obj) or obj
 
 
 def _unique_material_name(mat, wanted):
@@ -74,7 +96,12 @@ def export_mesh(context, obj, path):
     prev_active = vl.objects.active
     prev_selected = [o for o in vl.objects if o.select_get()]
     prev_mode = obj.mode
+    prev_active_mode = "OBJECT"
     try:
+        if prev_active is not None and prev_active != obj and prev_active.mode != "OBJECT":
+            # e.g. a Brushstroke Tools curves object being edited
+            prev_active_mode = prev_active.mode
+            bpy.ops.object.mode_set(mode="OBJECT")
         if obj.mode == "EDIT":
             obj.update_from_editmode()
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -120,6 +147,8 @@ def export_mesh(context, obj, path):
                 pass
         try:
             vl.objects.active = prev_active
+            if prev_active_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=prev_active_mode)
         except Exception:
             pass
 

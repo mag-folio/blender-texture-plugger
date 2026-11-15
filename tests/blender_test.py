@@ -990,6 +990,42 @@ def test_undo_cannot_break_link(module):
           and swapped.name == "RelinkSwapped" and not wf.material_project(swapped))
 
 
+def test_brushstroke_objects_target_surface(module):
+    print("\n[Brushstroke Tools objects: Create & Paint works on the surface mesh]")
+    import importlib
+    wf = importlib.import_module(module).workflow
+    root = os.path.join(TMP, "brush")
+    os.makedirs(root, exist_ok=True)
+    surf = new_cube("BsSurface", (0, 56, 0))
+    # The custom properties Brushstroke Tools puts on its objects.
+    strokes = bpy.data.objects.new("BsSurface - Brushstrokes", bpy.data.curves.new("bs", "CURVE"))
+    flow = bpy.data.objects.new("BsSurface - Brushstrokes-FLOW", bpy.data.curves.new("fl", "CURVE"))
+    for o in (strokes, flow):
+        bpy.context.scene.collection.objects.link(o)
+        o.parent = surf
+    strokes["BSBST_surface_object"] = surf
+    strokes["BSBST_flow_object"] = flow
+    strokes["BSBST_active"] = True
+    select_only(strokes)
+    check("brushstrokes object -> surface", wf._active_object(bpy.context) == surf)
+    select_only(flow)
+    check("flow object -> surface", wf._active_object(bpy.context) == surf)
+    select_only(surf)
+    check("plain mesh -> itself", wf._active_object(bpy.context) == surf)
+    select_only(flow)
+    res = bpy.ops.texture_plugger.create_set(directory=root, name="")
+    mat = surf.active_material
+    check("create with flow object active lands on the surface",
+          res == {"FINISHED"} and mat is not None and mat.name == "BsSurface"
+          and wf.material_project(mat) == os.path.join(root, "BsSurface"), os.listdir(root))
+    check("brushstroke objects get no material and no folder",
+          len(flow.material_slots) == 0 and len(strokes.material_slots) == 0
+          and os.listdir(root) == ["BsSurface"], os.listdir(root))
+    check("mesh exported, flow object still active",
+          os.path.isfile(str(mat.get(wf.MESH_KEY) or ""))
+          and bpy.context.view_layer.objects.active == flow)
+
+
 def test_disable_enable(module):
     print("\n[disable / re-enable]")
     try:
@@ -1017,6 +1053,7 @@ def main():
         test_ui_draw(module)
         test_create_and_paint(module)
         test_undo_cannot_break_link(module)
+        test_brushstroke_objects_target_surface(module)
         test_disable_enable(module)
     except Exception:
         traceback.print_exc()

@@ -143,10 +143,13 @@ def _draw_paint(panel, context):
     sub.scale_y = 1.4
     sub.operator("texture_plugger.create_set", icon="NEWFOLDER")
 
-    obj = context.view_layer.objects.active if context.view_layer else None
+    active = context.view_layer.objects.active if context.view_layer else None
+    obj = workflow._active_object(context)
     mat = obj.active_material if node_builder.object_supports_material(obj) else None
     folder = workflow.material_project(mat)
     layout.separator()
+    if obj is not None and obj != active:
+        layout.label(text=f"Brushstrokes on: {obj.name}", icon="OBJECT_DATA")
     if folder:
         layout.label(text=f"Set: {mat.name}", icon="TEXTURE")
     row = layout.row()
