@@ -255,6 +255,80 @@ It adds a **Blender Link** panel and a **Texture Plugger** menu:
   updates each time you press Send to Painter. Every object you sent keeps its own
   lighting; soloing it switches to that lighting.
 - **Match Blender View:** puts Painter's camera where your Blender view is.
+- **Bake Lighting:** paints the Blender lighting into the Base Color, so you can paint and
+  colour-pick lit colours (see below).
+
+### Bake Lighting: paint with the lighting in the Base Color
+
+Pick a texture set in the *Blender Link* panel and press **Bake Lighting** (the *Texture
+Plugger* menu can also do every linked set at once). The plugin then:
+
+1. bakes the *World Space Normal* and *AO* mesh maps first if the set doesn't have them yet
+   (the lighting needs them to know which way each pixel faces);
+2. adds a **Blender Lighting** layer at the top of the set: Painter's own *Baked Lighting
+   Environment* filter, fed that object's Blender lighting map, on *Passthrough* so it
+   lights the Base Color of everything below it;
+3. adds an empty **Lit Paint** layer above it and selects it.
+
+Paint on *Lit Paint* (or above it), picking colours from the lit result in the Base Color
+channel view. Layers below
+*Blender Lighting* are lit automatically, so you can still change the albedo under it. View
+the **Base Color channel** (press **C**) while painting: Painter's material view lights the
+already-lit colours a second time. The layer follows the lighting: after a new *Send to
+Painter*, or a switch between *Render* and *Material Preview* lighting, it updates on its
+own. *Remove Lighting* deletes the layer and keeps your *Lit Paint* layer.
+
+**Back in Blender:** exports (the panel's *Export to Blender* or Painter's own export
+dialog) write `texture_plugger_lit.json` next to the textures. Blender then shows those
+sets **unlit**: Base Color → Emission (strength 1) → Material Output, with Alpha through a
+Transparent mix. Blender's lamps don't light them a second time. The Principled BSDF network
+stays in the material, unplugged, and comes back if you export the set again without the
+lighting layer. Scenes that show unlit sets switch to the **Standard** view transform (no
+look, exposure 0, gamma 1), so the colours look exactly as painted. The previous settings
+come back when no unlit set is left. Both are add-on preferences (*Show Painter-Lit
+Textures Unlit*, *Standard View for Unlit*); the panel shows how many materials are unlit.
+
+Limits of the filter: its lighting is the map seen from the object's centre, so it can't
+show shadows that other objects cast across the surface. Measured, those areas come out
+1.9-2.4x too bright; open areas are within about 5-10%. The filter's *Horizontal Rotation*
+can be tweaked in the layer, and the plugin keeps your value. For the real shadows, bake
+the lighting to UVs first:
+
+### Bake Lighting to UVs (Cycles): the exact render lighting
+
+In Blender, select the meshes and press **Bake Lighting to UVs** (*Painter Link* box). For
+each texture set, Cycles bakes the light the object receives onto its own UVs: the Diffuse
+pass, Direct + Indirect, without colour. That includes every lamp, the world, bounce light,
+and cast and contact shadows. The bake is the size of the set's textures, uses *UV Lighting
+Bake Samples* (add-on preferences, 128 by default, not denoised), and includes your scene
+exposure. All objects that use the same texture set are baked together into one map. The
+operator's *Studio HDRI Too* option (off by default, doubles the time) adds a second bake lit
+by the Material Preview studio HDRI. That bake is Cycles with that HDRI, shadows and bounce
+included, so it isn't the same as EEVEE's Material Preview. Without it, Painter's *Material
+Preview* lighting mode keeps using the filter.
+
+Your scene is put back exactly afterwards: render engine and samples, bake settings, world,
+lamps, selection, mode and the materials. For the bake, the material is a plain diffuse
+with its own Base Color, so light bouncing off the object keeps its real colour. A set that
+was already exported with baked lighting has light in its Base Color, so a flat grey stands
+in for its albedo; bounce light off that object is then approximate. The maps go to the
+shared `texture_plugger_link` folder and are listed in `blender_lightmaps.json`. If you move
+a lamp or change the world and press *Send to Painter* after baking, the Painter panel marks
+the set *Cycles lightmap (outdated)*: bake again.
+
+Then press **Bake Lighting** in Painter as before. A set that has a Cycles lightmap gets a
+**Blender Lighting** *fill* layer on Base Color, with *Multiply* blending, instead of the
+filter: albedo x Cycles light, which is the diffuse colour a Cycles render shows. In the test
+scene (a plane, one sun, a box casting a shadow) the lightmap is within 1% of a Cycles
+render in the light and within 15% in the shadow, which there gets bounce light only; the
+filter was 1.9-2.4x too bright in such shadows. The panel lists such sets as *Cycles
+lightmap*. That set's Base Color channel switches to 16-bit float, because light brighter
+than 1 would otherwise be clipped before the Multiply. That doubles the channel's memory;
+exports still write normal PNGs. Baking again in Blender updates the layer on its own. Sets
+without a lightmap keep using the filter.
+
+Glossy reflections are view-dependent, so they aren't in either version. The UV bake uses
+the object's active UV map, which must be the one Painter paints on.
 
 Both apps share the folder `Documents\Adobe\Adobe Substance 3D Painter\texture_plugger_link`
 (the plugin goes into `...\python\startup`). Only maps still in use are kept there.

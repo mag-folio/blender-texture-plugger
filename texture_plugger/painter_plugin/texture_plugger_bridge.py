@@ -17,6 +17,11 @@ loads with Painter.  It adds a "Blender Link" panel (Window > Views) and a
 * Match Blender View: puts Painter's camera where your Blender viewport is.
 * Export to Blender: exports with the template and file type Blender's add-on
   reads (Blender (Principled BSDF), PNG) into the folder Blender watches.
+* Bake Lighting: lights a texture set's Base Color with its Blender lighting
+  (Painter's Baked Lighting Environment filter in a "Blender Lighting" layer),
+  so you paint and colour-pick lit colours on the "Lit Paint" layer above it.
+  Exports mark those sets (texture_plugger_lit.json) and Blender shows them
+  unlit, with emission only.
 
 Everything comes from ``../../texture_plugger_link/blender_link.json`` (next
 to the ``python`` folder), written by Blender's "Send to Painter" button.
@@ -29,7 +34,7 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.5.0"
 LINK_FILE = "blender_link.json"
 LINK_DIR_NAME = "texture_plugger_link"
 FRAME_MARGIN = 1.15
@@ -292,6 +297,131 @@ def read_link(path):
     return data if isinstance(data, dict) else None
 
 
+def write_json(path, data):
+    """Write ``data`` as JSON atomically (readers never see half a file)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+
+
+# ---- Lighting baked into Base Color ("Bake Lighting") ----------------------
+#
+# Painter's own "Baked Lighting Environment" filter lights the Base Color of the
+# layers below it with an environment map.  The plugin puts it in a layer of its
+# own at the top of a texture set ("Blender Lighting", Passthrough on Base
+# Color), feeds it that object's Blender lighting, and adds an empty "Lit Paint"
+# layer above it to paint on with colours picked from the lit result.  Exports
+# then carry the lighting in <set>_BaseColor.png, and a marker file next to the
+# textures tells Blender to show those sets unlit (emission only).
+
+LIGHT_LAYER_NAME = "Blender Lighting"
+LIT_PAINT_LAYER_NAME = "Lit Paint"
+LIGHT_FILTER = "baked_lighting_environment"
+LIT_MARKER = "texture_plugger_lit.json"        # same name in Blender's unlit.py
+META_CONTEXT = "texture_plugger"
+META_LIT_KEY = "lit_environments"
+# The filter's "Horizontal Rotation" (in turns, 0..1) that lines its environment up
+# with Painter's viewport environment, which the Blender map is already turned to.
+FILTER_YAW_TURNS = 0.0
+
+
+def file_stem(path):
+    """Lower-case file name without extension or UDIM tile: the key Blender matches on.
+
+    ``C:/t/Crate_BaseColor.1001.png`` and ``Crate_BaseColor.<UDIM>.png`` both give
+    ``crate_basecolor``.  Blender's ``unlit.file_stem`` must give the same.
+    """
+    name = os.path.basename(str(path).replace("\\", "/"))
+    stem = os.path.splitext(name)[0]
+    for sep in (".", "_"):
+        head, s, tail = stem.rpartition(sep)
+        if s and head and (tail.upper() == "<UDIM>" or (len(tail) == 4 and tail.isdigit())):
+            stem = head
+            break
+    return stem.lower()
+
+
+def base_color_stem(set_name, files):
+    """``file_stem`` of the Base Color file exported for ``set_name`` (or the usual name)."""
+    want = str(set_name).lower() + "_basecolor"
+    for f in files or ():
+        s = file_stem(f)
+        if s.startswith(want):
+            return s
+    for f in files or ():
+        s = file_stem(f)
+        if "basecolor" in s or "base_color" in s:
+            return s
+    return want
+
+
+def merge_lit_marker(old, exported):
+    """Marker contents after an export.
+
+    ``exported`` maps each texture set just exported to ``{"lit": bool,
+    "base_color": stem, ...}``; sets exported earlier keep their entry.
+    """
+    sets = {}
+    if isinstance(old, dict) and isinstance(old.get("sets"), dict):
+        sets = {k: v for k, v in old["sets"].items() if isinstance(v, dict)}
+    for name, info in (exported or {}).items():
+        sets[str(name)] = dict(info)
+    return {"version": 1, "sets": sets}
+
+
+LIGHTMAPS_FILE = "blender_lightmaps.json"     # written by Blender's Bake Lighting to UVs
+LIGHTMAP_PREFIX = "lightmap_"
+
+
+def lightmap_entry(lightmaps, set_name):
+    """A texture set's entry in ``blender_lightmaps.json`` contents, or None."""
+    sets = lightmaps.get("sets") if isinstance(lightmaps, dict) else None
+    if not isinstance(sets, dict) or not set_name:
+        return None
+    key = match_sets([set_name], sets).get(set_name)
+    info = sets.get(key) if key else None
+    return info if isinstance(info, dict) else None
+
+
+def pick_lightmap(lightmaps, set_name, mode="render"):
+    """Cycles lightmap file for a texture set and lighting mode, or None.
+
+    ``mode`` "preview" only takes a studio-HDRI lightmap; without one that mode
+    uses the Material Preview environment through the filter instead.
+    """
+    info = lightmap_entry(lightmaps, set_name)
+    return (info.get(mode) or None) if info else None
+
+
+def lightmap_outdated(entry, link):
+    """True when Blender sent different lighting (lamps, world, exposure) after
+    this lightmap was baked."""
+    if not isinstance(entry, dict) or not isinstance(link, dict):
+        return False
+    key, now = entry.get("lighting_key"), link.get("lighting_key")
+    if not key or not now or key == now:
+        return False
+    try:
+        return float(link.get("stamp") or 0) > float(entry.get("time") or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def is_lightmap(file_name):
+    return bool(file_name) and os.path.basename(str(file_name)).startswith(LIGHTMAP_PREFIX)
+
+
+def lit_updates(recorded, wanted):
+    """Lit sets whose lighting layer shows another map than the one they should now.
+
+    ``recorded``: set -> map file the layer was given; ``wanted``: set -> map file
+    for the current link and lighting mode.  Sets without a wanted map are left alone.
+    """
+    return sorted(n for n, env in (recorded or {}).items()
+                  if wanted.get(n) and wanted.get(n) != env)
+
+
 # ==========================================================================
 # Painter side
 # ==========================================================================
@@ -316,12 +446,22 @@ class Bridge:
         self.follow = True
         self.widget = None
         self.menu = None
+        self.tex_cache = {}          # lighting map path -> ResourceID (project texture)
+        self.lightmaps = None        # blender_lightmaps.json (Cycles UV bakes)
+        self.lm_mtime = None
+        self._filter_id = None       # the Baked Lighting Environment filter
+        self._lit_queue = []         # sets still to light (Bake Lighting)
+        self._baking = None          # set whose mesh maps are being baked
+        self._bake_restore = None    # (set, baker selection to put back)
+        self._baked_once = set()     # sets whose mesh maps we baked (never loop)
         self._handlers = []
         self.timer = QtCore.QTimer()
         self.timer.setInterval(POLL_MS)
         self.timer.timeout.connect(self._tick)
         for event, fn in ((ev.ProjectEditionEntered, self._on_project_ready),
-                          (ev.ProjectAboutToClose, self._on_project_closing)):
+                          (ev.ProjectAboutToClose, self._on_project_closing),
+                          (ev.ExportTexturesEnded, self._on_export_ended),
+                          (ev.BakingProcessEnded, self._on_baking_ended)):
             ev.DISPATCHER.connect(event, fn)
             self._handlers.append((event, fn))
 
@@ -455,6 +595,8 @@ class Bridge:
                     self.apply_lighting(self.sent_set())     # new lighting: the object just sent
                 else:                                        # e.g. a view-only send: stay on
                     self.apply_lighting()                    # the set being worked on
+            if self.reload_lightmaps() or changed:
+                self.refresh_lit_layers()                    # new Blender lighting: relight
             names = tuple(self.texture_set_names())
             if names != self.last_set_names:      # mesh reimported / sets added
                 self.last_set_names = names
@@ -515,6 +657,7 @@ class Bridge:
             self.log("Blender sent no Material Preview lighting: press Send to Painter "
                      "in Blender (the add-on sends it with the render lighting)", warn=True)
         self.apply_lighting(force=True)
+        self.refresh_lit_layers()          # baked layers follow the lighting shown
         self.refresh_ui()
         return True
 
@@ -561,6 +704,507 @@ class Bridge:
             self.log("Blender render lighting applied" + (f" (baked around '{owner}')" if owner else ""))
         return True
 
+    # ------------------------------------------------- lighting in Base Color
+    def _lit_record(self):
+        """Texture set -> lighting map its "Blender Lighting" layer was given (saved
+        with the project)."""
+        import substance_painter.project as pj
+        try:
+            rec = pj.Metadata(META_CONTEXT).get(META_LIT_KEY)
+        except Exception:
+            rec = None
+        return {str(k): str(v) for k, v in rec.items()} if isinstance(rec, dict) else {}
+
+    def _save_lit_record(self, rec):
+        import substance_painter.project as pj
+        try:
+            pj.Metadata(META_CONTEXT).set(META_LIT_KEY, dict(rec))
+        except Exception as ex:
+            self.log(f"could not remember the lit texture sets: {ex}", warn=True)
+
+    @staticmethod
+    def _stack(set_name):
+        import substance_painter.textureset as ts
+        return ts.TextureSet.from_name(set_name).get_stack()
+
+    def light_layer(self, set_name):
+        """The "Blender Lighting" layer of a texture set, or None."""
+        import substance_painter.layerstack as ls
+        try:
+            nodes = ls.get_root_layer_nodes(self._stack(set_name))
+        except Exception:
+            return None
+        for node in nodes:
+            try:
+                if node.get_name() == LIGHT_LAYER_NAME:
+                    return node
+            except Exception:
+                continue
+        return None
+
+    def _filter_resource(self):
+        """ResourceID of Painter's "Baked Lighting Environment" filter (starter assets)."""
+        import substance_painter.resource as rs
+        if self._filter_id is not None:
+            return self._filter_id
+        found = []
+        try:
+            found = rs.Resource.retrieve(rs.ResourceID(context="starter_assets", name=LIGHT_FILTER))
+        except Exception:
+            pass
+        if not found:
+            try:
+                found = [r for r in rs.search(LIGHT_FILTER)
+                         if LIGHT_FILTER in r.identifier().name.lower()]
+            except Exception:
+                found = []
+        todo = list(found)
+        while todo:              # the .sbsar package or the graph inside it
+            r = todo.pop(0)
+            try:
+                if rs.Usage.FILTER in r.usages():
+                    self._filter_id = r.identifier()
+                    return self._filter_id
+                todo.extend(r.children())
+            except Exception:
+                continue
+        return None
+
+    def reload_lightmaps(self):
+        """Re-read blender_lightmaps.json when Blender rewrote it. Returns True if changed."""
+        path = os.path.join(self.link_dir, LIGHTMAPS_FILE)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            changed = self.lightmaps is not None
+            self.lightmaps, self.lm_mtime = None, None
+            return changed
+        if mtime == self.lm_mtime:
+            return False
+        data = read_link(path)
+        if data is None:
+            return False                     # being written: next tick
+        self.lightmaps, self.lm_mtime = data, mtime
+        self.refresh_ui()
+        return True
+
+    def lightmap_for(self, set_name):
+        return pick_lightmap(self.lightmaps, set_name, self.light_mode)
+
+    def lightmap_is_outdated(self, set_name):
+        return lightmap_outdated(lightmap_entry(self.lightmaps, set_name), self.data)
+
+    def lighting_for(self, set_name):
+        """What lights a set's Base Color: its Cycles lightmap if Blender baked one,
+        else its environment map (through Painter's filter)."""
+        return self.lightmap_for(set_name) or self.environment_for(set_name)
+
+    def _env_texture(self, env_name):
+        """The Blender lighting map as a project texture (saved inside the .spp, so
+        the layer keeps working after Blender replaces or prunes the file)."""
+        import substance_painter.resource as rs
+        path = os.path.join(self.link_dir, env_name)
+        rid = self.tex_cache.get(path)
+        if rid is not None:
+            return rid
+        res_name = "Blender lighting " + os.path.splitext(env_name)[0]
+        try:
+            have = rs.Resource.retrieve(rs.ResourceID.from_project(res_name))
+        except Exception:
+            have = []
+        if have:
+            rid = have[0].identifier()
+        else:
+            if not os.path.isfile(path):
+                raise RuntimeError(f"lighting file missing: {env_name} (press Send to Painter "
+                                   "in Blender)")
+            rid = rs.import_project_resource(path, rs.Usage.TEXTURE, name=res_name,
+                                             group="Texture Plugger").identifier()
+        self.tex_cache[path] = rid
+        return rid
+
+    def _root_layer(self, set_name, layer_name):
+        import substance_painter.layerstack as ls
+        try:
+            for node in ls.get_root_layer_nodes(self._stack(set_name)):
+                if node.get_name() == layer_name:
+                    return node
+        except Exception:
+            pass
+        return None
+
+    def _insert_position(self, set_name):
+        """Top of the stack, or just below an existing Lit Paint layer (so its strokes
+        are never lit a second time)."""
+        import substance_painter.layerstack as ls
+        lit_paint = self._root_layer(set_name, LIT_PAINT_LAYER_NAME)
+        if lit_paint is not None:
+            return ls.InsertPosition.below_node(lit_paint)
+        return ls.InsertPosition.from_textureset_stack(self._stack(set_name))
+
+    def _select_lit_paint(self, set_name, paint):
+        import substance_painter.layerstack as ls
+        if paint is not None and set_name == self.active_set_name():
+            try:
+                ls.set_selected_nodes([paint])       # ready to paint above the lighting
+            except Exception:
+                pass
+
+    def _apply_light_layer(self, set_name, source):
+        """Create or update a set's "Blender Lighting" layer from a Cycles lightmap
+        or an environment map. Returns True if the layer was created."""
+        if is_lightmap(source):
+            return self._apply_lightmap_layer(set_name, source)
+        return self._apply_filter_layer(set_name, source)
+
+    def _ensure_float_base(self, set_name):
+        """Base Color in 16-bit float, so light brighter than 1 survives the Multiply
+        (in 8 bit the lightmap would be clipped to 1 first and sunlit areas come out
+        too dark).  Exports to PNG still clip the final colour, as they should."""
+        import substance_painter.textureset as ts
+        stack = self._stack(set_name)
+        ch = stack.get_channel(ts.ChannelType.BaseColor)
+        fmt = str(ch.format()).rsplit(".", 1)[-1]
+        if not fmt.endswith("F"):
+            stack.edit_channel(ts.ChannelType.BaseColor, ts.ChannelFormat.RGB16F)
+            self.log(f"'{set_name}': Base Color switched to 16-bit float (was {fmt}) for the "
+                     "baked lighting")
+
+    def _apply_lightmap_layer(self, set_name, lightmap):
+        """Fill layer, Base Color only, Multiply: albedo x Cycles lighting."""
+        import substance_painter.layerstack as ls
+        import substance_painter.textureset as ts
+        rid = self._env_texture(lightmap)
+        layer = self.light_layer(set_name)
+        if layer is not None and not isinstance(layer, ls.FillLayerNode):
+            ls.delete_node(layer)                    # was the filter version
+            layer = None
+        self._ensure_float_base(set_name)
+        created = paint = None
+        with ls.ScopedModification("Blender lighting"):
+            if layer is None:
+                layer = ls.insert_fill(self._insert_position(set_name))
+                layer.set_name(LIGHT_LAYER_NAME)
+                layer.active_channels = {ts.ChannelType.BaseColor}
+                layer.set_blending_mode(ls.BlendingMode.Multiply, ts.ChannelType.BaseColor)
+                created = True
+            src = layer.set_source(ts.ChannelType.BaseColor, rid)
+            try:        # the EXR holds linear light values
+                spaces = src.list_available_color_spaces()
+                lin = next((c for c in spaces if "linear" in str(c).lower()
+                            or "raw" in str(c).lower()), None)
+                if lin is not None:
+                    src.set_color_space(lin)
+            except Exception:
+                pass
+            if self._root_layer(set_name, LIT_PAINT_LAYER_NAME) is None:
+                paint = ls.insert_paint(ls.InsertPosition.above_node(layer))
+                paint.set_name(LIT_PAINT_LAYER_NAME)
+        self._select_lit_paint(set_name, paint)
+        return bool(created)
+
+    def _apply_filter_layer(self, set_name, env_name):
+        """Passthrough layer with Painter's Baked Lighting Environment filter."""
+        import substance_painter.layerstack as ls
+        import substance_painter.textureset as ts
+        fres = self._filter_resource()
+        if fres is None:
+            raise RuntimeError("Painter's 'Baked Lighting Environment' filter is not in the shelf")
+        env_id = self._env_texture(env_name)
+        layer = self.light_layer(set_name)
+        if layer is not None and isinstance(layer, ls.FillLayerNode):
+            ls.delete_node(layer)                    # was the lightmap version
+            layer = None
+        created = paint = None
+        with ls.ScopedModification("Blender lighting"):
+            if layer is None:
+                layer = ls.insert_paint(self._insert_position(set_name))
+                layer.set_name(LIGHT_LAYER_NAME)
+                # Passthrough: the filter works on everything below this layer
+                layer.set_blending_mode(ls.BlendingMode.PassThrough, ts.ChannelType.BaseColor)
+                created = True
+            filt = next((e for e in layer.content_effects()
+                         if isinstance(e, ls.FilterEffectNode)), None)
+            new_filter = filt is None
+            if new_filter:
+                filt = ls.insert_filter_effect(
+                    ls.InsertPosition.inside_node(layer, ls.NodeStack.Content), fres)
+                try:
+                    filt.active_channels = {ts.ChannelType.BaseColor}
+                except Exception:
+                    pass
+            src = filt.get_source()
+            src.set_source("environment_map", env_id)
+            if new_filter and FILTER_YAW_TURNS:
+                try:     # later rotation tweaks made in Painter are kept
+                    src.set_parameters({"horizontal_rotation": float(FILTER_YAW_TURNS)})
+                except Exception:
+                    pass
+            if self._root_layer(set_name, LIT_PAINT_LAYER_NAME) is None:
+                paint = ls.insert_paint(ls.InsertPosition.above_node(layer))
+                paint.set_name(LIT_PAINT_LAYER_NAME)
+        self._select_lit_paint(set_name, paint)
+        return bool(created)
+
+    def _missing_mesh_maps(self, set_name):
+        """Mesh maps the filter uses that the set doesn't have yet.
+
+        World Space Normal is required (which way each pixel faces); AO is used
+        when present.
+        """
+        import substance_painter.textureset as ts
+        try:
+            t = ts.TextureSet.from_name(set_name)
+            return [u for u in (ts.MeshMapUsage.WorldSpaceNormal, ts.MeshMapUsage.AO)
+                    if t.get_mesh_map_resource(u) is None]
+        except Exception:
+            return []
+
+    def _has_world_normals(self, set_name):
+        import substance_painter.textureset as ts
+        return ts.MeshMapUsage.WorldSpaceNormal not in self._missing_mesh_maps(set_name)
+
+    def _bake_mesh_maps(self, set_name, missing):
+        """Bake only the ``missing`` mesh maps of one set (asynchronous).
+
+        Maps the set already has are not rebaked; the baker selection is put
+        back when the bake ends.
+        """
+        import substance_painter.baking as bk
+        import substance_painter.textureset as ts
+        t = ts.TextureSet.from_name(set_name)
+        params = bk.BakingParameters.from_texture_set(t)
+        before = list(params.get_enabled_bakers())
+        params.set_enabled_bakers(list(missing))
+        self._baking = set_name
+        self._bake_restore = (set_name, before)
+        self._baked_once.add(set_name)
+        try:
+            bk.bake_async(t)
+        except Exception:
+            self._restore_bakers()
+            self._baking = None
+            raise
+        self.log(f"baking the mesh maps the lighting needs for '{set_name}' first...")
+
+    def _restore_bakers(self):
+        import substance_painter.baking as bk
+        import substance_painter.textureset as ts
+        restore, self._bake_restore = self._bake_restore, None
+        if not restore:
+            return
+        try:
+            params = bk.BakingParameters.from_texture_set(ts.TextureSet.from_name(restore[0]))
+            params.set_enabled_bakers(restore[1])
+        except Exception:
+            pass
+
+    def bake_lighting(self, set_names=None):
+        """Bake Lighting: light each set's Base Color with its Blender lighting.
+
+        Sets without baked mesh maps get them baked first (one at a time); the
+        layer is added when their bake ends.
+        """
+        if not self.project_ready():
+            self.log("open a project first", warn=True)
+            return False
+        self.reload_lightmaps()
+        if not self.data and not self.lightmaps:
+            self.log("no Blender lighting yet: select the object in Blender and press "
+                     "Send to Painter (or Bake Lighting to UVs)", warn=True)
+            return False
+        names = [n for n in (set_names or [self.active_set_name()]) if n]
+        if not names:
+            return False
+        if self._baking is not None:
+            self._lit_queue.extend(n for n in names if n not in self._lit_queue)
+            self.log(f"queued after the bake of '{self._baking}'")
+            return True
+        self._lit_queue = list(names)
+        self._baked_once.clear()          # a new press may bake again
+        self._continue_lit_queue()
+        return True
+
+    def _continue_lit_queue(self):
+        rec = self._lit_record()
+        done, borrowed, outdated = [], [], []
+        while self._lit_queue:
+            name = self._lit_queue.pop(0)
+            env = self.lighting_for(name)
+            if not env:
+                self.log(f"no Blender lighting for '{name}': press Send to Painter in Blender",
+                         warn=True)
+                continue
+            missing = [] if is_lightmap(env) else self._missing_mesh_maps(name)
+            if missing and name not in self._baked_once:
+                try:
+                    self._bake_mesh_maps(name, missing)
+                    self._lit_queue.insert(0, name)      # light it when the bake ends
+                    break
+                except Exception as ex:
+                    self.log(f"could not bake mesh maps for '{name}': {ex}", warn=True)
+                    continue
+            if not is_lightmap(env) and not self._has_world_normals(name):   # baked once: stop
+                self.log(f"'{name}' has no World Space Normal mesh map: bake it in Painter's "
+                         "Baking mode, then press Bake Lighting again", warn=True)
+                continue
+            try:
+                self._apply_light_layer(name, env)
+            except Exception as ex:
+                self.log(f"could not bake the lighting into '{name}': {ex}", warn=True)
+                continue
+            if is_lightmap(env) and self.lightmap_is_outdated(name):
+                outdated.append(name)
+            rec[name] = env
+            done.append(name)
+            info = self.set_info(name)
+            if (not is_lightmap(env) and self.light_mode == "render"
+                    and not (isinstance(info, dict) and info.get("environment"))):
+                borrowed.append(name)
+        self._save_lit_record(rec)
+        if done:
+            msg = (f"lighting baked into the Base Color of {', '.join(done[:3])}"
+                   f"{f' and {len(done) - 3} more' if len(done) > 3 else ''}. Paint on "
+                   f"'{LIT_PAINT_LAYER_NAME}' and view the Base Color channel (C) to see it flat")
+            if borrowed:
+                msg += (f". {len(borrowed)} set(s) have no lighting of their own and use the "
+                        "last object sent (Send to Painter on them in Blender to fix)")
+            if outdated:
+                msg += (f". The Cycles lightmap of {', '.join(outdated[:3])} is older than the "
+                        "lighting Blender sent last: press Bake Lighting to UVs in Blender again")
+            self.log(msg, warn=bool(outdated))
+        self.refresh_ui()
+
+    def _on_baking_ended(self, e):
+        from PySide6 import QtCore
+        name, self._baking = self._baking, None
+        if name is None:
+            return                     # a bake the user started: not ours
+        self._restore_bakers()
+        try:
+            import substance_painter.ui as ui
+            ui.switch_to_mode(ui.UIMode.Edition)
+        except Exception:
+            pass
+        status = str(getattr(e, "status", ""))
+        if not status.endswith("Success"):
+            self.log(f"mesh map bake for '{name}' did not finish ({status}): lighting not added",
+                     warn=True)
+            self._lit_queue = [n for n in self._lit_queue if n != name]
+
+        def go():                      # after Painter is back in edit mode
+            try:
+                self._continue_lit_queue()
+            except Exception as ex:
+                self.log(f"could not bake the lighting: {ex}", warn=True)
+        QtCore.QTimer.singleShot(0, go)
+
+    def bake_lighting_all(self):
+        """Bake Lighting for every linked texture set (asks first on big scenes)."""
+        names = list(match_sets(self.texture_set_names(), self.sets()))
+        if len(names) > 25:
+            from PySide6 import QtWidgets
+            import substance_painter.ui as ui
+            ans = QtWidgets.QMessageBox.question(
+                ui.get_main_window(), "Bake Lighting",
+                f"Add a lighting layer (and bake missing mesh maps) for {len(names)} texture "
+                "sets? This can take a long time and makes the project heavier.")
+            if ans != QtWidgets.QMessageBox.StandardButton.Yes:
+                return False
+        return self.bake_lighting(names)
+
+    def remove_lighting(self, set_names=None):
+        """Delete the "Blender Lighting" layer (the Lit Paint layer and its paint stay)."""
+        import substance_painter.layerstack as ls
+        if not self.project_ready():
+            return False
+        rec = self._lit_record()
+        removed = []
+        for name in [n for n in (set_names or [self.active_set_name()]) if n]:
+            layer = self.light_layer(name)
+            if layer is not None:
+                try:
+                    ls.delete_node(layer)
+                    removed.append(name)
+                except Exception as ex:
+                    self.log(f"could not remove the lighting of '{name}': {ex}", warn=True)
+                    continue
+            rec.pop(name, None)
+        self._save_lit_record(rec)
+        self.log(f"baked lighting removed from {', '.join(removed)}" if removed
+                 else "no baked lighting layer on that texture set")
+        self.refresh_ui()
+        return bool(removed)
+
+    def lit_set_names(self):
+        return [n for n in self.texture_set_names() if self.light_layer(n) is not None]
+
+    def refresh_lit_layers(self):
+        """Give lit sets the lighting Blender sent last (and the mode shown)."""
+        if not self.project_ready() or self._baking is not None:
+            return
+        if not self.data and not self.lightmaps:
+            return
+        rec = self._lit_record()
+        if not rec:
+            return
+        wanted = {n: self.lighting_for(n) for n in rec}
+        changed = []
+        for name in lit_updates(rec, wanted):
+            if self.light_layer(name) is None:
+                rec.pop(name, None)            # layer deleted by hand
+                continue
+            try:
+                self._apply_light_layer(name, wanted[name])
+                rec[name] = wanted[name]
+                changed.append(name)
+            except Exception as ex:
+                self.log(f"could not update the baked lighting of '{name}': {ex}", warn=True)
+        if changed or len(rec) != len(self._lit_record()):
+            self._save_lit_record(rec)
+        if changed:
+            self.log(f"baked lighting updated in {len(changed)} texture set(s)")
+
+    def write_lit_markers(self, textures):
+        """Tell Blender which exported sets carry the lighting in their Base Color.
+
+        ``textures`` is Painter's export result: {(set, stack): [files]}.  Writes
+        ``texture_plugger_lit.json`` next to the files.
+        """
+        rec = self._lit_record()
+        by_dir = {}
+        for key, files in (textures or {}).items():
+            set_name = key[0] if isinstance(key, (tuple, list)) else str(key)
+            files = [str(f) for f in (files or [])]
+            if not files:
+                continue
+            layer = self.light_layer(set_name)
+            try:
+                lit = layer is not None and layer.is_visible()
+            except Exception:
+                lit = False
+            info = {"lit": bool(lit), "base_color": base_color_stem(set_name, files)}
+            if lit and rec.get(set_name):
+                info["source"] = "cycles lightmap" if is_lightmap(rec[set_name]) else "filter"
+                info["environment"] = rec[set_name]
+                info["mode"] = self.light_mode
+            by_dir.setdefault(os.path.dirname(os.path.abspath(files[0])), {})[set_name] = info
+        for folder, exported in by_dir.items():
+            path = os.path.join(folder, LIT_MARKER)
+            old = read_link(path)
+            if old is None and not any(i["lit"] for i in exported.values()):
+                continue                       # nothing lit, now or before: no file
+            try:
+                write_json(path, merge_lit_marker(old, exported))
+            except OSError as ex:
+                self.log(f"could not write {LIT_MARKER}: {ex}", warn=True)
+
+    def _on_export_ended(self, e):
+        try:
+            self.write_lit_markers(getattr(e, "textures", None))
+        except Exception as ex:
+            self.log(f"could not mark the lit texture sets for Blender: {ex}", warn=True)
+
     # ------------------------------------------------------------------ export
     def export_dir(self):
         import substance_painter.export as ex
@@ -604,8 +1248,14 @@ class Bridge:
         if res.status != ex.ExportStatus.Success:
             self.log(f"export {res.status.name.lower()}: {res.message}", warn=True)
             return False
+        try:      # also done by the export event; repeated here in case it isn't sent
+            self.write_lit_markers(res.textures)
+        except Exception as exc:
+            self.log(f"could not mark the lit texture sets for Blender: {exc}", warn=True)
         n = sum(len(v) for v in res.textures.values())
-        self.log(f"exported {n} texture(s) for Blender to {out}")
+        lit = [k[0] for k in res.textures if self.light_layer(k[0]) is not None]
+        self.log(f"exported {n} texture(s) for Blender to {out}"
+                 + (f" ({len(lit)} set(s) with baked lighting: Blender shows them unlit)" if lit else ""))
         return True
 
     # ------------------------------------------------------------------ camera
@@ -732,6 +1382,11 @@ class Bridge:
     # ------------------------------------------------------------------ events
     def _on_project_ready(self, _e):
         self.env_cache.clear()
+        self.tex_cache.clear()
+        self._lit_queue = []
+        self._baking = None
+        self._bake_restore = None
+        self._baked_once.clear()
         self.applied_env = None
         self.soloing = False
         # already "seen": the first tick must not swap to the first set's lighting
@@ -824,6 +1479,11 @@ class Bridge:
     def _on_project_closing(self, _e):
         self.soloing = False
         self.applied_env = None
+        self.tex_cache.clear()
+        self._lit_queue = []
+        self._baking = None
+        self._bake_restore = None
+        self._baked_once.clear()
 
     def refresh_ui(self):
         if self.widget is not None:
@@ -913,6 +1573,22 @@ def _make_panel(bridge):
             lay.addLayout(row)
 
             row = QtWidgets.QHBoxLayout()
+            b = QtWidgets.QPushButton("Bake Lighting")
+            b.setToolTip("Light the selected texture set's Base Color with its Blender lighting "
+                         "(Painter's Baked Lighting Environment filter, in a 'Blender Lighting' "
+                         "layer), and add a 'Lit Paint' layer above it to paint lit colours on. "
+                         "Bakes the World Space Normal and AO mesh maps first if they are "
+                         "missing. Exports then show it unlit in Blender")
+            b.clicked.connect(lambda: bridge.bake_lighting([self.selected()]))
+            row.addWidget(b)
+            b = QtWidgets.QPushButton("Remove Lighting")
+            b.setToolTip("Delete the selected set's 'Blender Lighting' layer (your Lit Paint "
+                         "layer stays). Export again so Blender shows it lit normally")
+            b.clicked.connect(lambda: bridge.remove_lighting([self.selected()]))
+            row.addWidget(b)
+            lay.addLayout(row)
+
+            row = QtWidgets.QHBoxLayout()
             row.addWidget(QtWidgets.QLabel("Lighting:"))
             self.mode_render = QtWidgets.QRadioButton("Render")
             self.mode_render.setToolTip("Blender's scene lighting (world + lamps) baked around the "
@@ -940,7 +1616,8 @@ def _make_panel(bridge):
             lay.addWidget(self.follow)
             hint = QtWidgets.QLabel("Arrow buttons orbit around the selected object's centre at the "
                                     "current zoom. Alt + left-drag orbits around the point under "
-                                    "the cursor instead.")
+                                    "the cursor instead. With baked lighting, view the Base Color "
+                                    "channel (C) to paint: the material view lights it twice.")
             hint.setWordWrap(True)
             hint.setEnabled(False)
             lay.addWidget(hint)
@@ -988,12 +1665,18 @@ def _make_panel(bridge):
             names = bridge.texture_set_names() if bridge.project_ready() else []
             linked = bridge.sets()
             keys = match_sets(names, linked)
+            lit = set(bridge._lit_record()) if names else set()
             for n in names:
                 tag = []
                 if n in keys:
                     tag.append("bounds")
                     if linked[keys[n]].get("environment"):
                         tag.append("own lighting")
+                if bridge.lightmap_for(n):
+                    tag.append("Cycles lightmap (outdated)" if bridge.lightmap_is_outdated(n)
+                               else "Cycles lightmap")
+                if n in lit:
+                    tag.append("baked lighting")
                 it = QtWidgets.QListWidgetItem(n + (f"   [{', '.join(tag)}]" if tag else "   [not in Blender link]"))
                 it.setData(QtCore.Qt.UserRole, n)
                 self.list.addItem(it)
@@ -1031,6 +1714,12 @@ def start_plugin():
                      ("Export to Blender", lambda: _bridge.export_to_blender()),
                      ("Export Active Texture Set to Blender",
                       lambda: _bridge.export_to_blender(_bridge.active_set_name())),
+                     ("Bake Lighting into Active Texture Set",
+                      lambda: _bridge.bake_lighting([_bridge.active_set_name()])),
+                     ("Bake Lighting into All Linked Texture Sets",
+                      lambda: _bridge.bake_lighting_all()),
+                     ("Remove Baked Lighting from Active Texture Set",
+                      lambda: _bridge.remove_lighting([_bridge.active_set_name()])),
                      ("Lighting: Blender Render", lambda: _bridge.set_light_mode("render")),
                      ("Lighting: Blender Material Preview", lambda: _bridge.set_light_mode("preview"))):
         act = QtGui.QAction(text, menu)

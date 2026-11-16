@@ -76,6 +76,11 @@ def option_annotations():
 OPTION_NAMES = tuple(option_annotations().keys())
 
 
+def _unlit_changed(_self, _context):
+    from . import unlit      # imports prefs itself
+    unlit.mark_dirty()
+
+
 def kw_prop_name(type_id):
     return "kw_" + type_id
 
@@ -156,6 +161,20 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         description="Also send the viewport's Material Preview lighting (its studio HDRI, "
                     "rotation and strength), so Painter can switch between it and the "
                     "render lighting")
+    bake_samples: IntProperty(
+        name="UV Lighting Bake Samples", default=128, min=8, max=8192,
+        description="Cycles samples for Bake Lighting to UVs (not denoised: raise it if "
+                    "the baked light looks grainy)")
+    unlit_from_painter: BoolProperty(
+        name="Show Painter-Lit Textures Unlit", default=True, update=_unlit_changed,
+        description="Texture sets lit with Bake Lighting in Painter carry their lighting in "
+                    "the Base Color: show them with emission only (Base Color -> Emission), "
+                    "so Blender's lights don't light them twice")
+    unlit_view_transform: BoolProperty(
+        name="Standard View for Unlit", default=True, update=_unlit_changed,
+        description="Scenes showing such materials use the Standard view transform (no "
+                    "tone mapping, exposure 0) so colours look exactly as painted; the "
+                    "previous settings come back when none are left")
 
     def draw(self, context):
         layout = self.layout
@@ -192,6 +211,9 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         grid.prop(self, "light_min_size")
         grid.prop(self, "env_surroundings")
         grid.prop(self, "env_preview")
+        grid.prop(self, "bake_samples")
+        grid.prop(self, "unlit_from_painter")
+        grid.prop(self, "unlit_view_transform")
         box.operator("texture_plugger.install_painter_plugin", icon="IMPORT")
 
         box = col.box()

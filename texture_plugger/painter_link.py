@@ -336,3 +336,53 @@ def prune_environments(link_dir, keep, prefix="env_"):
             except OSError:
                 pass      # Painter may still hold it open; try again next time
     return removed
+
+
+# --------------------------------------------------------------------------
+# Lightmaps: Cycles lighting baked onto each texture set's UVs
+# --------------------------------------------------------------------------
+
+LIGHTMAPS_FILE = "blender_lightmaps.json"      # same name in the Painter plugin
+LIGHTMAP_PREFIX = "lightmap_"
+
+
+def lightmap_name(set_name, mode, stamp):
+    """File name for a set's lightmap (``mode`` is "render" or "preview")."""
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in str(set_name))
+    return f"{LIGHTMAP_PREFIX}{mode}_{safe}_{int(stamp)}.exr"
+
+
+def merge_lightmaps(old, updates):
+    """Lightmaps file contents after baking ``updates`` (set -> {"render": file,
+    "preview": file or None, ...}); other sets keep their entry, and a mode not
+    baked this time is dropped for the updated set (it no longer matches)."""
+    sets = {}
+    if isinstance(old, dict) and isinstance(old.get("sets"), dict):
+        sets = {k: dict(v) for k, v in old["sets"].items() if isinstance(v, dict)}
+    for name, info in (updates or {}).items():
+        sets[str(name)] = {k: v for k, v in dict(info).items() if v is not None}
+    return {"version": FORMAT_VERSION, "sets": sets}
+
+
+def referenced_lightmaps(data):
+    refs = set()
+    sets = data.get("sets") if isinstance(data, dict) else None
+    for info in (sets or {}).values():
+        if isinstance(info, dict):
+            for mode in ("render", "preview"):
+                if info.get(mode):
+                    refs.add(info[mode])
+    return refs
+
+
+def write_lightmaps(link_dir, updates):
+    """Merge ``updates`` into the lightmaps file (atomic) and delete unused maps."""
+    os.makedirs(link_dir, exist_ok=True)
+    path = os.path.join(link_dir, LIGHTMAPS_FILE)
+    data = merge_lightmaps(read_link(path), updates)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+    prune_environments(link_dir, referenced_lightmaps(data), prefix=LIGHTMAP_PREFIX)
+    return path

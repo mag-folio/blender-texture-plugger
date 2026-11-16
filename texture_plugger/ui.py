@@ -3,7 +3,7 @@
 
 import bpy
 
-from . import detection, node_builder, prefs, scaffold, uv_unwrap, workflow
+from . import detection, node_builder, prefs, scaffold, unlit, uv_unwrap, workflow
 
 CATEGORY = "Texture Plugger"
 
@@ -193,10 +193,16 @@ def _draw_paint(panel, context):
     row.operator("texture_plugger.send_to_painter", icon="EXPORT")
     op = row.operator("texture_plugger.send_to_painter", text="", icon="VIEW_CAMERA")
     op.lighting = False
+    row = box.row()
+    row.enabled = obj is not None and obj.type == "MESH"
+    row.operator("texture_plugger.bake_lighting_uv", icon="RENDER_STILL")
     if p is not None:
         col = box.column(align=True)
         col.prop(p, "send_on_launch", text="Send when opening Painter")
         col.prop(p, "env_surroundings")
+        col.prop(p, "unlit_from_painter")
+    if unlit.last_status:
+        box.label(text=unlit.last_status, icon="SHADING_RENDERED")
 
 
 def _shader_poll(context):
