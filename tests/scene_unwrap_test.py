@@ -233,6 +233,34 @@ def test(mod):
         check("max faces: reported", info and any("Max Faces" in m for m in info["messages"]),
               info and info["messages"])
 
+        # Background processes: same UVs as unwrapping in this Blender, nothing solved here.
+        pool = importlib.import_module(mod.__name__ + ".unwrap_pool")
+        bare, dup, kept, flat = build_scene()
+        info, err = run(batch, s, batch.collect_targets(bpy.context, "SELECTED"))
+        here = [uvs(o) for o in (bare, kept, flat)]
+        bare, dup, kept, flat = build_scene()
+        min_tasks, pool.MIN_TASKS = pool.MIN_TASKS, 1
+        solved_before = len(solves)
+        try:
+            check("pool: usable", pool.usable(bpy.context, [bare, kept, flat]))
+            info, err = run(batch, s, batch.collect_targets(bpy.context, "SELECTED"))
+        finally:
+            pool.MIN_TASKS = min_tasks
+        check("pool: batch ok", info is not None, err)
+        check("pool: four meshes unwrapped", info and info.get("unwrapped") == 4,
+              info and (info.get("unwrapped"), info["messages"]))
+        check("pool: nothing solved in this Blender", len(solves) == solved_before,
+              solves[solved_before:])
+        there = [uvs(o) for o in (bare, kept, flat)]
+        check("pool: same UVs as in this Blender",
+              all(a and b and len(a) == len(b) and max(abs(x - y) for x, y in zip(a, b)) < 1e-5
+                  for a, b in zip(here, there)))
+        check("pool: meshes stamped, copies too",
+              all(uvu.is_optimized(o) for o in (bare, kept, flat, bpy.data.objects["Twin"])))
+        check("pool: still object mode", bpy.context.mode == "OBJECT", bpy.context.mode)
+        check("pool: no temporary objects left",
+              not any(o.name.startswith("tp_unwrap") for o in bpy.data.objects))
+
         # Off: no unwrapping even with Smart Seams installed.
         bare, dup, kept, flat = build_scene()
         s.scene_unwrap_mode = "NONE"

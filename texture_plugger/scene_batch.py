@@ -21,7 +21,8 @@ import time
 import bpy
 from bpy.props import EnumProperty
 
-from . import node_builder, operators, prefs, scaffold, scene_plan, uv_unwrap, workflow
+from . import (node_builder, operators, prefs, scaffold, scene_plan, unwrap_pool, uv_unwrap,
+               workflow)
 from .operators import _safe
 
 SCENE_KEY = "texture_plugger_scene"
@@ -115,7 +116,10 @@ def export_meshes(context, objs, path):
             o.select_set(False)
         chosen = []
         for o in objs:
-            o.select_set(True)
+            try:
+                o.select_set(True)
+            except RuntimeError:
+                continue                  # not in this view layer (in no collection)
             if o.select_get():
                 chosen.append(o)
         if not chosen:
@@ -324,25 +328,54 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
     total = len(batches) + len(plan) + len(objs) + 2
     done = 0
     unwrapped, unwrap_failed = 0, set()
-    for i, group in enumerate(batches):
+
+    def unwrap_done(group, err):
+        """Book one solved (or failed) mesh and give its copies the same UVs."""
+        nonlocal unwrapped
         ob = group[0]
-        yield done, total, (f"{UNWRAP_STEP} {ob.name} with Smart Seams ({i + 1}/{len(batches)}, "
-                            f"{len(ob.data.polygons)} faces)")
-        err = uv_unwrap.unwrap_one(context, ob)
         if err:
             for o in group:
                 unwrap_failed.add(o.data.name_full)
             more = f" and {len(group) - 1} copies" if len(group) > 1 else ""
             messages.append(f"'{ob.name}'{more}: Smart Seams could not unwrap it ({err})")
-        else:
-            unwrapped += 1
-            for o in group[1:]:
-                try:
-                    uv_unwrap.copy_unwrap(ob, o)
-                    unwrapped += 1
-                except Exception as ex:
-                    unwrap_failed.add(o.data.name_full)
-                    messages.append(f"'{o.name}': could not copy the UVs of '{ob.name}' ({ex})")
+            return
+        unwrapped += 1
+        for o in group[1:]:
+            try:
+                uv_unwrap.copy_unwrap(ob, o)
+                unwrapped += 1
+            except Exception as ex:
+                unwrap_failed.add(o.data.name_full)
+                messages.append(f"'{o.name}': could not copy the UVs of '{ob.name}' ({ex})")
+
+    # Many or dense meshes: Smart Seams runs in background Blenders, several
+    # meshes at once, and this Blender stays responsive. Otherwise, or for
+    # whatever the background could not start, one by one right here.
+    pool = unwrap_pool.start(context, [g[0] for g in batches]) if batches else None
+    if pool is not None:
+        group_of = {g[0].name_full: g for g in batches}
+        batches = []
+        try:
+            while not pool.finished():
+                arrived = pool.poll()
+                for ob, err, fallback in arrived:
+                    if fallback:
+                        batches.append(group_of[ob.name_full])
+                        continue
+                    unwrap_done(group_of[ob.name_full], err)
+                    done += 1
+                if not arrived:
+                    time.sleep(0.05)
+                now = pool.running()
+                names = ", ".join(now[:3]) + (" ..." if len(now) > 3 else "")
+                yield done, total, f"Smart Seams is unwrapping {names or '...'} ({len(now)} at once),"
+        finally:
+            pool.close()
+    for i, group in enumerate(batches):
+        ob = group[0]
+        yield done, total, (f"{UNWRAP_STEP} {ob.name} with Smart Seams ({i + 1}/{len(batches)}, "
+                            f"{len(ob.data.polygons)} faces)")
+        unwrap_done(group, uv_unwrap.unwrap_one(context, ob))
         done += 1
         yield done, total, "Unwrapped with Smart Seams"
 
@@ -377,6 +410,7 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
 
     opts = operators.build_options(settings)
     all_ids = tuple(map_ids)
+    images = node_builder.image_cache()     # thousands of images: no search per file
     built = 0
     for ob in built_objs:
         for slot in ob.material_slots:
@@ -393,7 +427,9 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
             operators.store_known_set(settings, set_name,
                                       [(spec.map_type, p) for spec, p, _ in results])
             maps, msgs = operators.collect_maps(settings)
-            res = node_builder.build_material(mat, maps, opts, settings.set_name, settings.set_key)
+            with images:
+                res = node_builder.build_material(mat, maps, opts, settings.set_name,
+                                                  settings.set_key)
             for w in list(msgs) + list(res.warnings):
                 if w not in messages:
                     messages.append(w)

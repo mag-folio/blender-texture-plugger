@@ -49,8 +49,14 @@ def needs_unwrap(ob):
     return (max(us) - min(us) < _EPS) or (max(vs) - min(vs) < _EPS)
 
 
+# Raise when Smart Seams gets a fix that should redo meshes an older version
+# unwrapped (2: shells could be left stacked on top of each other when the
+# file had UV sync selection off).
+STAMP_VERSION = 2
+
+
 def _signature(me):
-    return f"{len(me.vertices)}/{len(me.edges)}/{len(me.polygons)}"
+    return f"v{STAMP_VERSION}:{len(me.vertices)}/{len(me.edges)}/{len(me.polygons)}"
 
 
 def is_optimized(ob):

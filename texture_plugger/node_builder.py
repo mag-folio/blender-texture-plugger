@@ -194,6 +194,62 @@ def _udim_token_path(path: str, tile: int) -> str:
     return os.path.join(folder, stem + ext)
 
 
+# Path -> image datablock, while ``image_cache()`` is open. Without it every
+# load asks Blender to compare the path with every image in the file: with a
+# whole scene (thousands of placeholder images) that was half the run time.
+_image_index = None
+
+
+def _image_path_key(img):
+    return os.path.normcase(os.path.abspath(bpy.path.abspath(img.filepath)))
+
+
+class image_cache:
+    """``with cache:`` makes ``load_image`` reuse images through a path index
+    instead of a search over all images for every file. The index is built the
+    first time it is entered and kept, so one object can be entered again for
+    every step of a long job."""
+
+    def __init__(self):
+        self._index = None
+
+    def __enter__(self):
+        global _image_index
+        self._prev = _image_index
+        if self._index is None:
+            self._index = {}
+            for img in bpy.data.images:
+                try:
+                    if img.library is not None or img.source in {"VIEWER", "GENERATED", "TILED"}:
+                        continue
+                    if img.filepath:
+                        self._index.setdefault(_image_path_key(img), img)
+                except Exception:
+                    continue
+        _image_index = self._index
+        return self
+
+    def __exit__(self, *exc):
+        global _image_index
+        _image_index = self._prev
+        return False
+
+
+def _load_single(abspath):
+    if _image_index is None:
+        return bpy.data.images.load(abspath, check_existing=True)
+    key = os.path.normcase(abspath)
+    img = _image_index.get(key)
+    if img is not None:
+        try:
+            if _image_path_key(img) == key:      # still there, still this file
+                return img
+        except ReferenceError:                   # removed meanwhile
+            pass
+    img = _image_index[key] = bpy.data.images.load(abspath, check_existing=False)
+    return img
+
+
 def load_image(path: str, udim_tiles=(), relative=False):
     """Load (or reuse) an image datablock. Returns (image, warning_or_None)."""
     abspath = os.path.abspath(bpy.path.abspath(path))
@@ -226,7 +282,7 @@ def load_image(path: str, udim_tiles=(), relative=False):
         except Exception:
             pass
     else:
-        img = bpy.data.images.load(abspath, check_existing=True)
+        img = _load_single(abspath)
     if relative:
         if bpy.data.filepath:
             try:
