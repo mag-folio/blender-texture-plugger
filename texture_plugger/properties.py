@@ -107,6 +107,11 @@ class TEXTUREPLUGGER_PG_settings(bpy.types.PropertyGroup):
                ("NONE", "Off", "Don't unwrap anything")),
         description="Create Sets for Scene first unwraps the objects with the Smart Seams "
                     "add-on (uses its settings), so Painter gets clean UVs")
+    scene_unwrap_max_faces: IntProperty(
+        name="Max Faces", default=0, min=0, soft_max=50000,
+        description="0 = unwrap every mesh (dense ones are done last). A number skips meshes "
+                    "with more faces than that (Smart Seams can take minutes on each); they "
+                    "keep the UVs they have")
 
 
 for _name, _prop in prefs.option_annotations().items():

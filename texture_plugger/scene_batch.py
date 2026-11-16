@@ -304,18 +304,45 @@ def iter_create_scene_sets(context, settings, objs, root, map_ids, size, limits=
         shown = ", ".join(kept_painted[:8]) + (" ..." if len(kept_painted) > 8 else "")
         messages.append(f"Kept the UVs of {len(kept_painted)} object(s) whose textures are "
                         f"already painted (new UVs would scramble them): {shown}")
-    total = len(to_unwrap) + len(plan) + len(objs) + 2
+
+    # Meshes with the same geometry (copies that were made single user) are
+    # solved once and get the same UVs. Light meshes first: dense ones take
+    # minutes, and Esc between objects keeps everything done so far.
+    max_faces = int(getattr(settings, "scene_unwrap_max_faces", 0) or 0)
+    groups, too_dense = {}, []
+    for ob in to_unwrap:
+        if max_faces and len(ob.data.polygons) > max_faces:
+            too_dense.append(ob.name)
+            continue
+        groups.setdefault(uv_unwrap.geometry_key(ob.data), []).append(ob)
+    if too_dense:
+        shown = ", ".join(too_dense[:8]) + (" ..." if len(too_dense) > 8 else "")
+        messages.append(f"Not unwrapped: {len(too_dense)} mesh(es) over {max_faces} faces "
+                        f"(Max Faces): {shown}")
+    batches = sorted(groups.values(), key=lambda g: len(g[0].data.polygons))
+
+    total = len(batches) + len(plan) + len(objs) + 2
     done = 0
     unwrapped, unwrap_failed = 0, set()
-    for ob in to_unwrap:
-        yield done, total, (f"{UNWRAP_STEP} {ob.name} with Smart Seams "
-                            f"({done + 1}/{len(to_unwrap)})")
+    for i, group in enumerate(batches):
+        ob = group[0]
+        yield done, total, (f"{UNWRAP_STEP} {ob.name} with Smart Seams ({i + 1}/{len(batches)}, "
+                            f"{len(ob.data.polygons)} faces)")
         err = uv_unwrap.unwrap_one(context, ob)
         if err:
-            unwrap_failed.add(ob.data.name_full)
-            messages.append(f"'{ob.name}': Smart Seams could not unwrap it ({err})")
+            for o in group:
+                unwrap_failed.add(o.data.name_full)
+            more = f" and {len(group) - 1} copies" if len(group) > 1 else ""
+            messages.append(f"'{ob.name}'{more}: Smart Seams could not unwrap it ({err})")
         else:
             unwrapped += 1
+            for o in group[1:]:
+                try:
+                    uv_unwrap.copy_unwrap(ob, o)
+                    unwrapped += 1
+                except Exception as ex:
+                    unwrap_failed.add(o.data.name_full)
+                    messages.append(f"'{o.name}': could not copy the UVs of '{ob.name}' ({ex})")
         done += 1
         yield done, total, "Unwrapped with Smart Seams"
 

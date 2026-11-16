@@ -176,7 +176,12 @@ Non-Color. Because the add-on writes the textures, the material is wired up stra
      line. Existing UVs are never changed.
    - **Off**: nothing is unwrapped.
 
-   A mesh shared by several objects is unwrapped once. Smart Seams uses its own settings
+   A mesh shared by several objects is unwrapped once, and meshes with exactly the same
+   geometry (copies that were made single user) are solved once and get the same UVs. Light
+   meshes go first and dense ones last. **Max Faces** (0 = no limit, the default) can skip
+   very dense meshes; they keep their UVs and are named in a message. While Smart Seams
+   works, Blender's window keeps responding (it doesn't redraw until the object is done), and
+   Esc stops between objects. Smart Seams uses its own settings
    (sidebar > Smart Seams). If it fails on an object, that object keeps the UVs it had and
    you get a message. Without Smart Seams the objects are left as they are (Painter can
    auto-unwrap them on import) and you get a message naming them. Unwrapping a dense mesh

@@ -48,8 +48,8 @@ def uvs(ob):
     return list(co)
 
 
-def cube(name, loc):
-    bpy.ops.mesh.primitive_cube_add(size=1, location=loc)
+def cube(name, loc, size=1.0):
+    bpy.ops.mesh.primitive_cube_add(size=size, location=loc)
     ob = bpy.context.active_object
     ob.name = name
     ob.data.name = name + "_mesh"
@@ -67,8 +67,11 @@ def build_scene():
     dup = bpy.data.objects.new("BareDup", bare.data)     # shares Bare's mesh
     dup.location = (2, 0, 0)
     bpy.context.scene.collection.objects.link(dup)
-    kept = cube("Kept", (4, 0, 0))                       # hand-made UVs: never touched
-    flat = cube("Flat", (6, 0, 0))                       # UV map collapsed to one point
+    twin = bpy.data.objects.new("Twin", bare.data.copy())  # own mesh, same geometry as Bare
+    twin.location = (-2, 0, 0)
+    bpy.context.scene.collection.objects.link(twin)
+    kept = cube("Kept", (4, 0, 0), 1.5)                  # hand-made UVs
+    flat = cube("Flat", (6, 0, 0), 2.0)                  # UV map collapsed to one point
     n = len(flat.data.loops)
     flat.data.uv_layers.active.data.foreach_set("uv", array.array("f", [0.5] * (2 * n)))
     for o in bpy.context.view_layer.objects:
@@ -105,6 +108,15 @@ def test(mod):
     sys.path.insert(0, SEAMS_ROOT)
     seams = importlib.import_module("smart_seams")
     seams.register()
+    seams_pipeline = importlib.import_module("smart_seams.core.pipeline")
+    real_unwrap = seams_pipeline.unwrap
+    solves = []
+
+    def logged_unwrap(obj, opts=None):
+        solves.append(obj.name)
+        return real_unwrap(obj, opts)
+
+    seams_pipeline.unwrap = logged_unwrap
     try:
         check("smart seams detected", uvu.smart_seams_available())
         check("default mode is All Objects", s.scene_unwrap_mode == "ALL", s.scene_unwrap_mode)
@@ -117,7 +129,11 @@ def test(mod):
         check("batch with smart seams ok", info is not None, err)
         if info is None:
             return
-        check("two meshes unwrapped (shared mesh once)", info.get("unwrapped") == 2, info)
+        check("three meshes unwrapped (shared mesh once)", info.get("unwrapped") == 3, info)
+        twin = bpy.data.objects["Twin"]
+        check("same geometry: solved once, UVs copied",
+              uvs(twin) == uvs(bare) and uvu.is_optimized(twin)
+              and sum(1 for c in solves if c == "Twin") == 0, solves)
         check("bare object got UVs", bare.data.uv_layers and not uvu.needs_unwrap(bare))
         check("collapsed UVs unwrapped", not uvu.needs_unwrap(flat))
         check("existing UVs untouched", uvs(kept) == kept_before)
@@ -149,7 +165,7 @@ def test(mod):
         kept_before = uvs(kept)
         info, err = run(batch, s, batch.collect_targets(bpy.context, "SELECTED"))
         check("ALL: batch ok", info is not None, err)
-        check("ALL: three meshes unwrapped", info and info.get("unwrapped") == 3,
+        check("ALL: four meshes unwrapped", info and info.get("unwrapped") == 4,
               info and info.get("unwrapped"))
         check("ALL: existing UVs re-unwrapped", uvs(kept) != kept_before)
         check("ALL: meshes stamped", all(uvu.is_optimized(o) for o in (bare, kept, flat)))
@@ -207,6 +223,16 @@ def test(mod):
               and uvu.is_optimized(bare) and uvu.is_optimized(flat),
               info and info.get("unwrapped"))
 
+        # Max Faces: denser meshes are skipped and named.
+        bare, dup, kept, flat = build_scene()
+        s.scene_unwrap_max_faces = 5                          # every cube has 6 faces
+        info, err = run(batch, s, batch.collect_targets(bpy.context, "SELECTED"))
+        s.scene_unwrap_max_faces = 0
+        check("max faces: nothing unwrapped", info and info.get("unwrapped") == 0
+              and not bare.data.uv_layers, info and info.get("unwrapped"))
+        check("max faces: reported", info and any("Max Faces" in m for m in info["messages"]),
+              info and info["messages"])
+
         # Off: no unwrapping even with Smart Seams installed.
         bare, dup, kept, flat = build_scene()
         s.scene_unwrap_mode = "NONE"
@@ -215,6 +241,7 @@ def test(mod):
         check("toggle off leaves UVs alone", info and not info.get("unwrapped")
               and not bare.data.uv_layers, info and info.get("unwrapped"))
     finally:
+        seams_pipeline.unwrap = real_unwrap
         seams.unregister()
 
 

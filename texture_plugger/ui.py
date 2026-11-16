@@ -178,6 +178,9 @@ def _draw_paint(panel, context):
     op.scope = "VISIBLE"
     row = box.row()
     row.prop(settings, "scene_unwrap_mode")
+    sub = row.row()
+    sub.active = settings.scene_unwrap_mode != "NONE"
+    sub.prop(settings, "scene_unwrap_max_faces")
     if settings.scene_unwrap_mode != "NONE" and not uv_unwrap.smart_seams_available():
         box.label(text="Enable the Smart Seams add-on to unwrap", icon="INFO")
     box.operator("texture_plugger.edit_scene_in_painter", icon="TPAINT_HLT")

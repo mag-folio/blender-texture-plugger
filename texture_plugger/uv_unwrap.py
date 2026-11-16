@@ -8,6 +8,7 @@ replaces the active UV map and the seams, and those could be hand-made.
 """
 
 import array
+import hashlib
 
 import bpy
 
@@ -85,6 +86,39 @@ def _restore(me, snap):
         me.update()
     except Exception:
         pass
+
+
+def geometry_key(me):
+    """Same key = same vertices, same faces, same shape: one unwrap fits both."""
+    lv = array.array("i", bytes(4 * len(me.loops)))
+    me.loops.foreach_get("vertex_index", lv)
+    co = array.array("f", bytes(12 * len(me.vertices)))
+    me.vertices.foreach_get("co", co)
+    h = hashlib.sha1(lv.tobytes())
+    h.update(array.array("f", [round(c, 4) + 0.0 for c in co]).tobytes())
+    return (len(me.vertices), len(me.edges), len(me.polygons), h.hexdigest())
+
+
+def _edge_keys(me):
+    ev = array.array("i", bytes(8 * len(me.edges)))
+    me.edges.foreach_get("vertices", ev)
+    return [(min(a, b), max(a, b)) for a, b in zip(ev[0::2], ev[1::2])]
+
+
+def copy_unwrap(src, dst):
+    """Give ``dst`` (same geometry) the UVs and seams Smart Seams made for ``src``."""
+    s, d = src.data, dst.data
+    uv = s.uv_layers.active
+    co = array.array("f", bytes(8 * len(s.loops)))
+    uv.data.foreach_get("uv", co)
+    duv = d.uv_layers.active or d.uv_layers.new(name=uv.name)
+    duv.data.foreach_set("uv", co)
+    seams = array.array("b", bytes(len(s.edges)))
+    s.edges.foreach_get("use_seam", seams)
+    by_pair = dict(zip(_edge_keys(s), seams))
+    d.edges.foreach_set("use_seam", array.array("b", [by_pair.get(k, 0) for k in _edge_keys(d)]))
+    d.update()
+    d[STAMP_KEY] = _signature(d)
 
 
 def unwrappable(ob):
