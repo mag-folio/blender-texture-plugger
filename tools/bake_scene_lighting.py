@@ -3,13 +3,15 @@
 then (optionally) Send to Painter.  The same steps as pressing the buttons, so the
 lightmaps land in Painter's shared link folder exactly as the button puts them.
 
-    blender -b "C:\\path\\Scene.blend" --python tools\\bake_scene_lighting.py -- [--send] [--work DIR]
+    blender -b "C:\\path\\Scene.blend" --python tools\\bake_scene_lighting.py -- [--send]
+            [--size AUTO|SET|256|512|1024] [--samples N] [--work DIR]
 
 * Runs with YOUR Blender preferences and the INSTALLED Texture Plugger add-on (do
   not pass --factory-startup): lightmap size, samples, GPU and lighting settings
   are the ones you chose.
 * Bakes in a second background Blender on a copy of the file (like the button), on
   the GPU when there is one.  Your .blend is never saved or changed.
+* ``--size`` / ``--samples`` override the add-on preferences for this run.
 * ``--send``: afterwards Send to Painter with the file's active object (lighting
   and the Material Preview lighting; the last viewport view sent is kept).
 * Run it once per .blend whose Painter project you want lit.  Lightmaps of several
@@ -54,12 +56,16 @@ def main():
     if not jobs:
         raise SystemExit("No Texture Plugger texture sets in this file (Create Sets for Scene first)")
     p = pkg.prefs.get_prefs(ctx)
-    samples = int(getattr(p, "bake_samples", 128)) if p else 128
-    size = str(getattr(p, "lightmap_size", "256")) if p else "256"
+    samples = int(getattr(p, "bake_samples", 256)) if p else 256
+    size = str(getattr(p, "lightmap_size", "AUTO")) if p else "AUTO"
+    if "--samples" in args:
+        samples = int(args[args.index("--samples") + 1])
+    if "--size" in args:              # AUTO, SET, or pixels (128 / 256 / 512 / 1024)
+        size = args[args.index("--size") + 1].upper()
     folder = sl.link_dir()
     key = lb.current_lighting_key(ctx)
     print(f"[bake] {os.path.basename(bpy.data.filepath)}: {len(jobs)} texture sets, "
-          f"{samples} samples, {size} px, into {folder}")
+          f"{samples} samples, size {size}, into {folder}")
 
     copy = os.path.join(work, "scene.blend")
     bpy.ops.wm.save_as_mainfile(filepath=copy, copy=True, relative_remap=True, compress=False,

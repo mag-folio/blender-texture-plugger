@@ -96,14 +96,73 @@ def scene_resolution():
         return 0
 
 
-def set_size(mat, choice="256", scene_res=0):
+MIN_ISLAND_PX = 12        # AUTO: pixels across a set's small UV pieces (10th percentile)
+MIN_ISLAND_AREA = 1e-5    # smaller pieces are under ~2 px in Painter at 512: ignored
+MAX_AUTO_SIZE = 2048
+
+
+def island_areas(objs, mat):
+    """UV-space areas of the UV islands (active UV map) of ``mat``'s faces on ``objs``."""
+    import numpy as np
+    from bpy_extras import mesh_utils
+    out = []
+    for ob in objs:
+        me = getattr(ob, "data", None)
+        if me is None or not getattr(me, "uv_layers", None) or not len(me.polygons):
+            continue
+        idx = [i for i, s in enumerate(ob.material_slots) if s.material == mat]
+        if not idx:
+            continue
+        f, l = len(me.polygons), len(me.loops)
+        uv = np.empty(l * 2, np.float32)
+        me.uv_layers.active.data.foreach_get("uv", uv)
+        uv = uv.reshape(-1, 2)
+        ls = np.empty(f, np.int32)
+        me.polygons.foreach_get("loop_start", ls)
+        lt = np.empty(f, np.int32)
+        me.polygons.foreach_get("loop_total", lt)
+        mi = np.empty(f, np.int32)
+        me.polygons.foreach_get("material_index", mi)
+        nxt = np.arange(l) + 1                       # next corner of the same face
+        nxt[ls + lt - 1] = ls
+        cross = uv[:, 0] * uv[nxt, 1] - uv[nxt, 0] * uv[:, 1]
+        order = np.argsort(ls)                       # reduceat needs ascending starts
+        area = np.empty(f, np.float64)
+        area[order] = np.abs(np.add.reduceat(cross, ls[order])) * 0.5
+        mine = np.isin(mi, idx)
+        for isl in mesh_utils.mesh_linked_uv_islands(me):
+            isl = np.asarray(isl, np.int64)
+            if mine[isl[0]]:
+                out.append(float(area[isl].sum()))
+    return out
+
+
+def auto_size(areas, base):
+    """Power-of-two lightmap size: ``base`` (the set's texture size) or more, so the
+    set's small UV pieces (10th percentile by area) are MIN_ISLAND_PX across."""
+    import math
+    size = max(256, int(base or 512))
+    real = sorted(a for a in areas if a >= MIN_ISLAND_AREA)
+    if real:
+        small = real[int(0.1 * (len(real) - 1))]
+        need = MIN_ISLAND_PX / math.sqrt(small)
+        while size < need and size < MAX_AUTO_SIZE:
+            size *= 2
+    return min(size, MAX_AUTO_SIZE)
+
+
+def set_size(mat, choice="256", scene_res=0, objs=None):
     """Lightmap size for a set.
 
-    ``choice`` is the *Lightmap Size* preference: a number of pixels (light
-    needs far less detail than paint, and bake time grows with the pixel count),
-    or "SET" for the texture set's own size: its Base Color texture, unless that
-    is a small flat placeholder, then the size Painter was set to.
+    ``choice`` is the *Lightmap Size* preference: a number of pixels, "SET" for
+    the texture set's own size (its Base Color texture, unless that is a small
+    flat placeholder, then the size Painter was set to), or "AUTO": that size,
+    doubled (up to 2048) until the set's small UV pieces get enough pixels.  At
+    256 px for 512 px textures Painter stretched each light pixel over four paint
+    pixels and sets cut into many small pieces looked blocky and noisy.
     """
+    if choice == "AUTO":
+        return auto_size(island_areas(objs or (), mat), set_size(mat, "SET", scene_res))
     if choice != "SET":
         return int(choice)
     size = 0
@@ -561,7 +620,7 @@ def bake_sets(context, jobs, folder, samples=128, preview=None, size_choice="256
     chunk's lightmaps entries; ``stop()`` returning True ends it between chunks.
     Returns (entries, errors).
     """
-    sizes = [set_size(m, size_choice, scene_res) for _o, m in jobs]
+    sizes = [set_size(m, size_choice, scene_res, objs) for objs, m in jobs]
     entries, errors, done = {}, [], 0
     world = image = None
     if preview is not None and not preview.get("scene_world"):
@@ -712,8 +771,8 @@ class TEXTUREPLUGGER_OT_bake_lighting_uv(bpy.types.Operator):
         except (OSError, RuntimeError) as ex:
             self.report({"WARNING"}, f"Could not install the Painter plugin: {ex}")
         p = prefs.get_prefs(context)
-        self.samples = int(getattr(p, "bake_samples", 128)) if p else 128
-        self.size_choice = str(getattr(p, "lightmap_size", "256")) if p else "256"
+        self.samples = int(getattr(p, "bake_samples", 256)) if p else 256
+        self.size_choice = str(getattr(p, "lightmap_size", "AUTO")) if p else "AUTO"
         self.folder = scene_link.link_dir()
         os.makedirs(self.folder, exist_ok=True)
         return jobs

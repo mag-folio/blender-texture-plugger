@@ -1297,6 +1297,14 @@ def test_uv_light_bake(module):
     print(f"    grain at 4 samples: {g0:.1%} raw, {g1:.1%} denoised; mean {m0:.3f} / {m1:.3f}")
     check("denoised lightmap: far less grain, same brightness",
           g1 < 0.5 * g0 and abs(m1 / max(m0, 1e-6) - 1) < 0.1, (round(g0, 3), round(g1, 3), m0, m1))
+    # Automatic lightmap size: the set's texture size, more for tiny UV pieces
+    check("auto size: one big UV piece gets the texture size",
+          lb.set_size(mat, "AUTO", 512, [plane]) == 512, lb.set_size(mat, "AUTO", 512, [plane]))
+    check("auto size: tiny pieces get more pixels, capped",
+          lb.auto_size([0.5] + [3e-4] * 20, 512) == 1024
+          and lb.auto_size([1e-4] * 20, 512) == 2048 and lb.auto_size([1e-4] * 20, 4096) == 2048
+          and lb.auto_size([0.9, 1e-9, 1e-9], 512) == 512,
+          (lb.auto_size([0.5] + [3e-4] * 20, 512), lb.auto_size([1e-4] * 20, 512)))
     check("denoising leaves no scene or node group behind",
           not any(s.name.startswith("TP_Denoise") for s in bpy.data.scenes)
           and not any(g.name.startswith("TP_Denoise") for g in bpy.data.node_groups))

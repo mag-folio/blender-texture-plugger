@@ -7,7 +7,7 @@ you paint lit colours on top of that lighting.
 
 It covers the first setup, the daily loop, coming back to a project later, changing the
 lighting, and what to do when something looks wrong. Button names are the ones in Texture
-Plugger 1.6.3 (Blender) and its Painter plugin 1.7.0.
+Plugger 1.6.4 (Blender) and its Painter plugin 1.7.1.
 
 ## What you need
 
@@ -16,8 +16,10 @@ Plugger 1.6.3 (Blender) and its Painter plugin 1.7.0.
   pick each add-on's zip from its `dist` folder).
 - Adobe Substance 3D Painter (tested with 12.2).
 - A graphics card is strongly recommended: the lighting bake uses it even if Cycles is
-  set to *None* in Blender's preferences (about 2.5 minutes for 350 texture sets on an RTX
-  5070; several times slower on the CPU).
+  set to *None* in Blender's preferences. On an RTX 5070 a 350-set office scene takes about
+  2.5 minutes at a fixed 256 px and 128 samples, and roughly 30-60 minutes at the
+  recommended Automatic size and 256 samples (several times slower on the CPU). You can
+  keep working meanwhile, but Painter and the bake share the graphics card.
 
 **After installing or updating an add-on, restart Blender.** Blender keeps running the
 old code it loaded at start-up. An older version baked the lighting inside Blender itself
@@ -57,9 +59,12 @@ So always bake the lightmaps:
 3. With your main object active, press **Send to Painter**. This sends the environment
    lighting, the Material Preview lighting, object bounds and the view.
 
-Settings (Edit > Preferences > Add-ons > Texture Plugger): *Lightmap Size* (256 px is
-plenty: light has far less detail than paint) and *UV Lighting Bake Samples* (128). Lightmaps are denoised
-automatically.
+Settings (Edit > Preferences > Add-ons > Texture Plugger): keep *Lightmap Size* on
+**Automatic** (each set gets its texture size, and up to 2048 px when its UVs are cut into
+tiny pieces, so even small objects aren't blocky) and *UV Lighting Bake Samples* at **256**
+(raise it if objects in deep shadow still look grainy). Lightmaps are denoised
+automatically. If you changed these before, set them back here: saved preferences win
+over the defaults.
 
 ### Without opening Blender's window
 
@@ -126,6 +131,8 @@ Moved a lamp or changed the world?
 |---|---|---|
 | Colours in Painter bluer or brighter than Blender | Those sets have no Cycles lightmap and use the environment map | Bake Lighting to UVs in Blender, then Bake Lighting (or Update Baked Lighting) in Painter |
 | Blender freezes for minutes on Bake Lighting to UVs | Blender is running an old add-on version from memory | Restart Blender after every add-on update |
+| Painter says *Save failed* (log: "Failed to load image content from file ... lightmap_render_...exr", "null surface") | A lighting map the project imported was cleaned out of the shared link folder (plugin before 1.7.1) | Painter > **Python** menu: untick and re-tick *texture_plugger_bridge* (it puts stand-in files back and checks again before every save), then save |
+| Small objects or finely cut sets look blocky or noisy | Lightmap too small for their UV pieces (a fixed 256 px before 1.6.4) | Lightmap Size *Automatic*, 256 samples, bake again, then **Update Baked Lighting** |
 | Walls look fuzzy or grainy after Bake Lighting | Lightmaps from before 1.6.3 weren't denoised, and Painter multiplied the grain over the paint | Update, restart Blender, Bake Lighting to UVs again, then **Update Baked Lighting** in Painter |
 | A floor or other object bakes black | Mirrored objects (negative scale) faced the wrong way in the bake (fixed in 1.6.2) | Update, restart Blender, bake again |
 | `Cycles lightmap (outdated)` in the list | Lamps or world changed after the bake | Bake again in Blender, then Update Baked Lighting |

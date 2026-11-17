@@ -334,9 +334,13 @@ Sets finished so far are kept, even if you stop it or close Blender. It bakes on
 graphics card when the computer has one, even if Cycles is set to *None* in Blender's
 preferences (the CPU is several times slower; your preferences aren't changed).
 
-Settings (add-on preferences): *Lightmap Size* (256 px by default; light needs far less
-detail than paint, and the bake time grows with the pixel count) and *UV Lighting Bake
-Samples* (128). Every lightmap is then denoised with OpenImageDenoise (Blender's own denoiser,
+Settings (add-on preferences): *Lightmap Size* and *UV Lighting Bake Samples* (256).
+*Automatic* size (the default) gives each set its own texture size, so one light pixel
+covers one paint pixel, and doubles it (up to 2048 px) for sets cut into small UV pieces
+until those pieces are at least 12 pixels across; pieces too small to see in Painter are
+ignored. At a fixed 256 px, small objects and finely cut sets came out blocky and grainy.
+Fixed sizes (128 to 1024 px, or the texture set size) are still there, and the bake time
+grows with the pixel count. Every lightmap is then denoised with OpenImageDenoise (Blender's own denoiser,
 in a throwaway scene, well under a second per map): raw Cycles grain was multiplied over
 the paint and made walls look fuzzy. It includes your scene exposure. All objects that use the same
 texture set are baked together into one map; material slots no face uses are skipped

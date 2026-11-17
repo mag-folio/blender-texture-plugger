@@ -162,17 +162,20 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
                     "rotation and strength), so Painter can switch between it and the "
                     "render lighting")
     lightmap_size: EnumProperty(
-        name="Lightmap Size", default="256",
-        items=(("128", "128 px", "Fastest"), ("256", "256 px", "Balanced"),
+        name="Lightmap Size", default="AUTO",
+        items=(("AUTO", "Automatic",
+                "Each set's own texture size (one light pixel per paint pixel), larger for sets "
+                "with tiny UV pieces so even those get enough pixels (up to 2048 px)"),
+               ("128", "128 px", "Fastest"), ("256", "256 px", "Balanced"),
                ("512", "512 px", "Sharper shadows, 4x the bake time of 256"),
                ("1024", "1024 px", "Very sharp, 16x the bake time of 256"),
                ("SET", "Texture Set Size", "Same size as the painted textures (slowest)")),
         description="Size of the lighting baked onto each texture set's UVs. Light needs far "
                     "less detail than paint: Painter stretches it smoothly over the set")
     bake_samples: IntProperty(
-        name="UV Lighting Bake Samples", default=128, min=8, max=8192,
-        description="Cycles samples for Bake Lighting to UVs (not denoised: raise it if "
-                    "the baked light looks grainy)")
+        name="UV Lighting Bake Samples", default=256, min=8, max=8192,
+        description="Cycles samples for Bake Lighting to UVs. The result is denoised; raise "
+                    "it if objects in deep shadow still look grainy")
     unlit_from_painter: BoolProperty(
         name="Show Painter-Lit Textures Unlit", default=True, update=_unlit_changed,
         description="Texture sets lit with Bake Lighting in Painter carry their lighting in "

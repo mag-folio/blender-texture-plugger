@@ -41,7 +41,7 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "1.7.0"
+PLUGIN_VERSION = "1.7.1"
 LINK_FILE = "blender_link.json"
 LINK_DIR_NAME = "texture_plugger_link"
 FRAME_MARGIN = 1.15
@@ -531,6 +531,52 @@ def lit_updates(recorded, wanted):
                   if wanted.get(n) and wanted.get(n) != env)
 
 
+LIGHT_RES_PREFIX = "Blender lighting "     # name of every lighting map the plugin imports
+PROJECT_LIGHT_DIR = "blender_lighting"     # copies of them, next to the .spp
+
+
+def lighting_stem(resource_name):
+    """File stem of a lighting map from its project resource name, or None."""
+    name = str(resource_name or "")
+    if not name.startswith(LIGHT_RES_PREFIX):
+        return None
+    stem = name[len(LIGHT_RES_PREFIX):].strip()
+    return stem or None
+
+
+def lightmap_set_from_stem(stem):
+    """Texture set name a lightmap file stem was baked for, or None.
+
+    Stems look like ``lightmap_render_<set>_<stamp>`` (``painter_link.lightmap_name``).
+    """
+    stem = str(stem or "")
+    for mode in ("render", "preview"):
+        head = f"{LIGHTMAP_PREFIX}{mode}_"
+        if stem.startswith(head):
+            body, sep, stamp = stem[len(head):].rpartition("_")
+            if sep and body and stamp.isdigit():
+                return body
+    return None
+
+
+def replacement_for(stem, lightmaps, link):
+    """Current file that best stands in for a lighting map that no longer exists:
+    the set's current lightmap, else Blender's current environment map."""
+    set_name = lightmap_set_from_stem(stem)
+    if set_name:
+        mode = "preview" if stem.startswith(f"{LIGHTMAP_PREFIX}preview_") else "render"
+        entry = lightmap_entry(lightmaps, set_name)
+        if isinstance(entry, dict) and (entry.get(mode) or entry.get("render")):
+            return entry.get(mode) or entry.get("render")
+        return None
+    if stem.startswith("env_preview_"):
+        pv = (link or {}).get("preview")
+        return pv.get("environment") if isinstance(pv, dict) else None
+    if stem.startswith("env_"):
+        return (link or {}).get("environment")
+    return None
+
+
 def lit_kind_swaps(recorded, wanted):
     """Lit sets whose update would change the KIND of lighting layer (Cycles
     lightmap <-> environment filter).  Such an update deletes the layer and makes
@@ -633,6 +679,7 @@ class Bridge:
         self.timer.setInterval(POLL_MS)
         self.timer.timeout.connect(self._tick)
         for event, fn in ((ev.ProjectEditionEntered, self._on_project_ready),
+                          (ev.ProjectAboutToSave, self._on_about_to_save),
                           (ev.ProjectAboutToClose, self._on_project_closing),
                           (ev.ExportTexturesEnded, self._on_export_ended),
                           (ev.BakingProcessEnded, self._on_baking_ended)):
@@ -996,15 +1043,32 @@ class Bridge:
         else its environment map (through Painter's filter)."""
         return self.lightmap_for(set_name) or self.environment_for(set_name)
 
+    def project_lighting_dir(self):
+        """Folder next to the saved .spp that keeps the plugin's own copies of the
+        lighting maps, or None for a never-saved project."""
+        import substance_painter.project as pj
+        try:
+            spp = pj.file_path() or ""
+        except Exception:
+            spp = ""
+        return os.path.join(os.path.dirname(spp), PROJECT_LIGHT_DIR) if spp else None
+
     def _env_texture(self, env_name):
-        """The Blender lighting map as a project texture (saved inside the .spp, so
-        the layer keeps working after Blender replaces or prunes the file)."""
+        """The Blender lighting map as a project texture.
+
+        Painter reads an imported texture's file again when it saves the project.
+        Blender deletes lighting maps nothing lists any more from the shared link
+        folder, and a project still holding one then could not be saved at all
+        ("null surface").  So the map is first copied into the project's own
+        ``blender_lighting`` folder and imported from there.
+        """
+        import shutil
         import substance_painter.resource as rs
         path = os.path.join(self.link_dir, env_name)
         rid = self.tex_cache.get(path)
         if rid is not None:
             return rid
-        res_name = "Blender lighting " + os.path.splitext(env_name)[0]
+        res_name = LIGHT_RES_PREFIX + os.path.splitext(env_name)[0]
         try:
             have = rs.Resource.retrieve(rs.ResourceID.from_project(res_name))
         except Exception:
@@ -1015,10 +1079,74 @@ class Bridge:
             if not os.path.isfile(path):
                 raise RuntimeError(f"lighting file missing: {env_name} (press Send to Painter "
                                    "in Blender)")
-            rid = rs.import_project_resource(path, rs.Usage.TEXTURE, name=res_name,
+            src = path
+            keep = self.project_lighting_dir()
+            if keep:
+                try:
+                    os.makedirs(keep, exist_ok=True)
+                    dst = os.path.join(keep, env_name)
+                    if not os.path.isfile(dst):
+                        shutil.copy2(path, dst)
+                    src = dst
+                except OSError as ex:
+                    self.log(f"could not copy {env_name} next to the project ({ex}); "
+                             "using the shared copy", warn=True)
+            rid = rs.import_project_resource(src, rs.Usage.TEXTURE, name=res_name,
                                              group="Texture Plugger").identifier()
         self.tex_cache[path] = rid
         return rid
+
+    def repair_lighting_resources(self):
+        """Put a file back for every lighting map of this project whose file is gone.
+
+        Painter re-reads them when saving and refuses to save the whole project if
+        one is missing.  The set's current lightmap (or Blender's current lighting
+        map) stands in at the old path; layers that still use it then simply show
+        the current lighting.  Returns the number of files put back.
+        """
+        import shutil
+        import substance_painter.resource as rs
+        if not self.project_ready():
+            return 0
+        try:
+            resources = rs.search(rs.StandardQuery.PROJECT_RESOURCES)
+        except Exception as ex:
+            self.log(f"could not list the project's lighting maps: {ex}", warn=True)
+            return 0
+        self.reload_lightmaps()
+        keep = self.project_lighting_dir()
+        fixed, lost = 0, []
+        for res in resources:
+            try:
+                stem = lighting_stem(res.identifier().name)
+            except Exception:
+                stem = None
+            if not stem:
+                continue
+            file_name = stem + ".exr"
+            places = [os.path.join(self.link_dir, file_name)]
+            if keep:
+                places.append(os.path.join(keep, file_name))
+            if any(os.path.isfile(p) for p in places):
+                continue
+            stand_in = replacement_for(stem, self.lightmaps, self.data)
+            src = os.path.join(self.link_dir, stand_in) if stand_in else ""
+            if not src or not os.path.isfile(src):
+                lost.append(stem)
+                continue
+            for dst in places:            # wherever Painter imported it from
+                try:
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                except OSError:
+                    pass
+            fixed += 1
+        if fixed:
+            self.log(f"put back {fixed} lighting map file(s) the project needs to save")
+        if lost:
+            self.log(f"no stand-in for {short_list(lost, 3)}: saving may fail; press Bake "
+                     "Lighting to UVs in Blender, then save again", warn=True)
+        return fixed
 
     def _root_layer(self, set_name, layer_name):
         import substance_painter.layerstack as ls
@@ -1776,7 +1904,17 @@ class Bridge:
         self.refresh_ui()
 
     # ------------------------------------------------------------------ events
+    def _on_about_to_save(self, _e):
+        try:
+            self.repair_lighting_resources()
+        except Exception as ex:          # never block a save
+            self.log(f"could not check the lighting maps before saving: {ex}", warn=True)
+
     def _on_project_ready(self, _e):
+        try:
+            self.repair_lighting_resources()
+        except Exception as ex:
+            self.log(f"could not check the lighting maps: {ex}", warn=True)
         self.env_cache.clear()
         self.tex_cache.clear()
         self._lit_queue = []

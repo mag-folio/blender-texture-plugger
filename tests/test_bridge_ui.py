@@ -92,5 +92,33 @@ class Placeholders(unittest.TestCase):
         self.assertFalse(br.is_placeholder_png(os.path.join(ROOT, "no_such.png")))
 
 
+class MissingLightingFiles(unittest.TestCase):
+    """Painter re-reads imported lighting maps on save; gone files block the save."""
+
+    def test_stem_from_resource_name(self):
+        self.assertEqual(br.lighting_stem("Blender lighting lightmap_render_Wall_17"),
+                         "lightmap_render_Wall_17")
+        self.assertIsNone(br.lighting_stem("From Blender Wall_BaseColor 12"))
+
+    def test_set_from_lightmap_stem(self):
+        self.assertEqual(br.lightmap_set_from_stem("lightmap_render_B_zierCurve_1794880495359"),
+                         "B_zierCurve")
+        self.assertEqual(br.lightmap_set_from_stem("lightmap_preview_cubicle_2_151_2_99"),
+                         "cubicle_2_151_2")
+        self.assertIsNone(br.lightmap_set_from_stem("env_1794880703743"))
+
+    def test_stand_in_is_the_current_map(self):
+        lm = {"sets": {"B_zierCurve": {"render": "lightmap_render_B_zierCurve_2.exr",
+                                       "preview": "lightmap_preview_B_zierCurve_2.exr"}}}
+        link = {"environment": "env_9.exr", "preview": {"environment": "env_preview_9.exr"}}
+        self.assertEqual(br.replacement_for("lightmap_render_B_zierCurve_1", lm, link),
+                         "lightmap_render_B_zierCurve_2.exr")
+        self.assertEqual(br.replacement_for("lightmap_preview_B_zierCurve_1", lm, link),
+                         "lightmap_preview_B_zierCurve_2.exr")
+        self.assertEqual(br.replacement_for("env_1", lm, link), "env_9.exr")
+        self.assertEqual(br.replacement_for("env_preview_1", lm, link), "env_preview_9.exr")
+        self.assertIsNone(br.replacement_for("lightmap_render_Gone_1", lm, link))
+
+
 if __name__ == "__main__":
     unittest.main()
