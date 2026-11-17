@@ -34,7 +34,7 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "1.5.1"
+PLUGIN_VERSION = "1.6.0"
 LINK_FILE = "blender_link.json"
 LINK_DIR_NAME = "texture_plugger_link"
 FRAME_MARGIN = 1.15
@@ -234,6 +234,71 @@ def blender_textures_dir(project_file, mesh_file, default_path=""):
             and os.path.isdir(default_path)):
         return default_path
     return ""
+
+
+FROM_BLENDER_LAYER_NAME = "From Blender"
+# Exported map suffix -> Painter channel it goes back into.  Normal and
+# Displacement are left out on purpose: the exported Normal already contains the
+# baked mesh normal map, so loading it back would apply the mesh detail twice.
+# Each suffix lists the channel's OpenPBR name first (Painter 12's default
+# projects: SpecularRoughness, BaseMetalness, EmissionColor) and its legacy
+# name second; the legacy names are aliases of the same channel types.
+LOAD_CHANNELS = (("BaseColor", ("BaseColor",)),
+                 ("Roughness", ("SpecularRoughness", "Roughness")),
+                 ("Metallic", ("BaseMetalness", "Metallic")),
+                 ("Emission", ("EmissionColor", "Emissive")),
+                 ("Alpha", ("Opacity",)))
+
+
+def blender_texture_files(textures_dir, set_name, names=None):
+    """{exported suffix: file} of a set's maps that can go back into Painter.
+
+    Matches ``<set>_<Suffix>.png`` case-insensitively, as Export to Blender wrote
+    them.  ``names`` (the folder listing) can be passed to avoid listing it again.
+    """
+    if names is None:
+        try:
+            names = os.listdir(textures_dir)
+        except OSError:
+            return {}
+    by_lower = {n.lower(): n for n in names}
+    out = {}
+    for suffix, _channels in LOAD_CHANNELS:
+        hit = by_lower.get(f"{set_name}_{suffix}.png".lower())
+        if hit:
+            out[suffix] = os.path.join(textures_dir, hit)
+    return out
+
+
+def channels_for_files(files, channel_enum, stack_channels):
+    """{Painter channel type: file} for the channels this stack actually has.
+
+    Compares channel *types*, not names: Painter reports an OpenPBR project's
+    roughness as ``SpecularRoughness`` while ``ChannelType.Roughness`` is an
+    alias of it, so name matching dropped Roughness and Metallic (Painter 12.2).
+    """
+    have = set(stack_channels)
+    out = {}
+    for suffix, candidates in LOAD_CHANNELS:
+        if suffix not in files:
+            continue
+        for name in candidates:
+            ch = getattr(channel_enum, name, None)
+            if ch is not None and ch in have:
+                out[ch] = files[suffix]
+                break
+    return out
+
+
+def project_save_path(folder, existing=()):
+    """Where to save a never-saved project: ``<folder>/<folder name>.spp``, or a
+    numbered name when that file already exists (never overwrite another project)."""
+    stem = os.path.basename(os.path.normpath(folder)) or "project"
+    taken = {str(e).lower() for e in existing}
+    name, n = f"{stem}.spp", 1
+    while name.lower() in taken:
+        name, n = f"{stem}_{n}.spp", n + 1
+    return os.path.join(folder, name)
 
 
 def blender_export_config(export_dir, set_names, preset_url):
@@ -1256,6 +1321,7 @@ class Bridge:
                      "Blender (Edit in Substance Painter) or save it in its texture set folder",
                      warn=True)
             return False
+        saved = self.save_project(out)   # Painter keeps the layers only in the .spp
         names = [only_set] if only_set else self.texture_set_names()
         preset = rs.ResourceID(context="starter_assets", name=BLENDER_PRESET).url()
         try:
@@ -1273,8 +1339,119 @@ class Bridge:
         n = sum(len(v) for v in res.textures.values())
         lit = [k[0] for k in res.textures if self.light_layer(k[0]) is not None]
         self.log(f"exported {n} texture(s) for Blender to {out}"
-                 + (f" ({len(lit)} set(s) with baked lighting: Blender shows them unlit)" if lit else ""))
+                 + (f" ({len(lit)} set(s) with baked lighting: Blender shows them unlit)" if lit else "")
+                 + (f"; project saved ({os.path.basename(saved)})" if saved else ""))
         return True
+
+    def save_project(self, export_dir):
+        """Save the Painter project before exporting, so it never falls behind the
+        textures Blender shows.  A never-saved project is saved into its texture
+        set folder (next to ``textures``), where Blender's Edit in Painter finds it.
+        Returns the saved path, or "" when nothing was saved."""
+        import glob
+        import substance_painter.project as pj
+        try:
+            path = pj.file_path() or ""
+            if path:
+                if not pj.needs_saving():
+                    return ""
+                pj.save()
+                return path
+            folder = os.path.dirname(os.path.normpath(export_dir))
+            existing = [os.path.basename(f) for f in glob.glob(os.path.join(glob.escape(folder), "*.spp"))]
+            path = project_save_path(folder, existing)
+            pj.save_as(path)
+            return path
+        except Exception as exc:          # busy, read-only...: still export
+            self.log(f"could not save the project before exporting: {exc}. Save it with "
+                     "Ctrl+S", warn=True)
+            return ""
+
+    # --------------------------------------------------------- load from Blender
+    def _from_blender_texture(self, path):
+        """A Blender texture as a project resource (saved inside the .spp). The file's
+        time is in the name, so a newer export is imported again, not reused."""
+        import substance_painter.resource as rs
+        try:
+            stamp = int(os.path.getmtime(path))
+        except OSError:
+            stamp = 0
+        res_name = f"From Blender {os.path.splitext(os.path.basename(path))[0]} {stamp}"
+        try:
+            have = rs.Resource.retrieve(rs.ResourceID.from_project(res_name))
+        except Exception:
+            have = []
+        if have:
+            return have[0].identifier()
+        return rs.import_project_resource(path, rs.Usage.TEXTURE, name=res_name,
+                                          group="Texture Plugger").identifier()
+
+    def load_from_blender(self, set_names=None):
+        """Put the textures Blender shows back into Painter: one "From Blender" fill
+        layer per texture set (Base Color, Roughness, Metallic, Emission, Alpha) from
+        the files in the folder Blender watches.  For a set with baked lighting it
+        goes above "Blender Lighting" (below "Lit Paint"), so it is not lit twice."""
+        import substance_painter.layerstack as ls
+        import substance_painter.textureset as ts
+        if not self.project_ready():
+            self.log("open a project first", warn=True)
+            return False
+        folder = self.export_dir()
+        if not folder:
+            self.log("no Texture Plugger 'textures' folder for this project: open it from "
+                     "Blender (Edit in Substance Painter)", warn=True)
+            return False
+        try:
+            listing = os.listdir(folder)
+        except OSError as exc:
+            self.log(f"cannot read {folder}: {exc}", warn=True)
+            return False
+        marker = read_link(os.path.join(folder, LIT_MARKER)) or {}
+        lit_sets = {k for k, v in (marker.get("sets") or {}).items()
+                    if isinstance(v, dict) and v.get("lit")}
+        names = [n for n in (set_names or self.texture_set_names()) if n]
+        done, missing, lit_warn, failed = [], [], [], []
+        for name in names:
+            try:
+                stack_channels = list(self._stack(name).all_channels())
+            except Exception:
+                missing.append(name)              # no such texture set
+                continue
+            files = channels_for_files(blender_texture_files(folder, name, listing),
+                                       ts.ChannelType, stack_channels)
+            if not files:
+                missing.append(name)
+                continue
+            try:
+                ids = {ch: self._from_blender_texture(f) for ch, f in files.items()}
+                with ls.ScopedModification("Load from Blender"):
+                    layer = self._root_layer(name, FROM_BLENDER_LAYER_NAME)
+                    if layer is None:
+                        layer = ls.insert_fill(self._insert_position(name))
+                        layer.set_name(FROM_BLENDER_LAYER_NAME)
+                    layer.active_channels = set(ids)
+                    for ch, rid in ids.items():
+                        layer.set_source(ch, rid)
+            except Exception as exc:
+                failed.append(f"{name} ({exc})")
+                continue
+            done.append(name)
+            if name in lit_sets and self.light_layer(name) is None:
+                lit_warn.append(name)
+        msg = (f"loaded Blender's textures into {len(done)} texture set(s) "
+               f"(layer '{FROM_BLENDER_LAYER_NAME}')") if done else "nothing loaded from Blender"
+        if missing:
+            msg += f"; no exported textures for {', '.join(missing[:3])}" + (
+                f" and {len(missing) - 3} more" if len(missing) > 3 else "")
+        if lit_warn:
+            msg += (f". {', '.join(lit_warn[:3])}: Blender's Base Color has lighting baked in "
+                    "but this project has no Blender Lighting layer; press Bake Lighting so "
+                    "the next export is marked lit again")
+        if failed:
+            msg += ". Failed: " + "; ".join(failed[:3])
+        self.log(msg, warn=bool(missing or lit_warn or failed or not done))
+        self.refresh_ui()
+        return bool(done)
 
     # ------------------------------------------------------------------ camera
     def frame_set(self, set_name):
@@ -1591,6 +1768,20 @@ def _make_panel(bridge):
             lay.addLayout(row)
 
             row = QtWidgets.QHBoxLayout()
+            b = QtWidgets.QPushButton("Load from Blender")
+            b.setToolTip("Bring the textures Blender shows back into Painter: a 'From Blender' "
+                         "fill layer per texture set (Base Color, Roughness, Metallic, Emission, "
+                         "Alpha) from the folder Blender watches. Normal and height are left "
+                         "out (the exported normal already holds the baked mesh detail)")
+            b.clicked.connect(lambda: bridge.load_from_blender())
+            row.addWidget(b)
+            b = QtWidgets.QPushButton("Load Selected")
+            b.setToolTip("Same, for the selected texture set only")
+            b.clicked.connect(lambda: bridge.load_from_blender([self.selected()]))
+            row.addWidget(b)
+            lay.addLayout(row)
+
+            row = QtWidgets.QHBoxLayout()
             b = QtWidgets.QPushButton("Bake Lighting")
             b.setToolTip("Light the selected texture set's Base Color with its Blender lighting "
                          "(Painter's Baked Lighting Environment filter, in a 'Blender Lighting' "
@@ -1732,6 +1923,9 @@ def start_plugin():
                      ("Export to Blender", lambda: _bridge.export_to_blender()),
                      ("Export Active Texture Set to Blender",
                       lambda: _bridge.export_to_blender(_bridge.active_set_name())),
+                     ("Load from Blender", lambda: _bridge.load_from_blender()),
+                     ("Load Active Texture Set from Blender",
+                      lambda: _bridge.load_from_blender([_bridge.active_set_name()])),
                      ("Bake Lighting into Active Texture Set",
                       lambda: _bridge.bake_lighting([_bridge.active_set_name()])),
                      ("Bake Lighting into All Linked Texture Sets",
