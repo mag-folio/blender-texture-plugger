@@ -375,8 +375,11 @@ def referenced_lightmaps(data):
     return refs
 
 
-def write_lightmaps(link_dir, updates):
-    """Merge ``updates`` into the lightmaps file (atomic) and delete unused maps."""
+def write_lightmaps(link_dir, updates, prune=True):
+    """Merge ``updates`` into the lightmaps file (atomic) and delete unused maps.
+
+    ``prune=False`` while a bake still runs: its next maps exist before they
+    are listed."""
     os.makedirs(link_dir, exist_ok=True)
     path = os.path.join(link_dir, LIGHTMAPS_FILE)
     data = merge_lightmaps(read_link(path), updates)
@@ -384,5 +387,6 @@ def write_lightmaps(link_dir, updates):
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=1, sort_keys=True)
     os.replace(tmp, path)
-    prune_environments(link_dir, referenced_lightmaps(data), prefix=LIGHTMAP_PREFIX)
+    if prune:
+        prune_environments(link_dir, referenced_lightmaps(data), prefix=LIGHTMAP_PREFIX)
     return path

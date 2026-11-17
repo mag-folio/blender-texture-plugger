@@ -9,7 +9,7 @@ for extensions.
 bl_info = {
     "name": "Texture Plugger",
     "author": "Texture Plugger contributors",
-    "version": (1, 6, 0),
+    "version": (1, 6, 2),
     "blender": (4, 5, 0),
     "location": "3D Viewport / Shader Editor > Sidebar > Texture Plugger; File > Import",
     "description": "Detect PBR texture maps from filenames and wire them into a Principled BSDF",

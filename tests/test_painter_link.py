@@ -422,7 +422,12 @@ class Lightmaps(unittest.TestCase):
         try:
             for n in ("lightmap_render_A_1.exr", "lightmap_render_A_2.exr", "env_1.exr"):
                 open(os.path.join(d, n), "wb").close()
-            pl.write_lightmaps(d, {"A": {"render": "lightmap_render_A_2.exr"}})
+            # while a bake runs: listed incrementally, nothing deleted
+            pl.write_lightmaps(d, {"A": {"render": "lightmap_render_A_2.exr"}}, prune=False)
+            self.assertEqual(len([n for n in os.listdir(d) if n.endswith(".exr")]), 3)
+            pl.write_lightmaps(d, {"B": {"render": "lightmap_render_B_1.exr"}}, prune=False)
+            self.assertEqual(set(pl.read_link(os.path.join(d, pl.LIGHTMAPS_FILE))["sets"]), {"A", "B"})
+            pl.write_lightmaps(d, {})          # at the end: unused maps go
             self.assertEqual(sorted(os.listdir(d)),
                              [pl.LIGHTMAPS_FILE, "env_1.exr", "lightmap_render_A_2.exr"])
         finally:

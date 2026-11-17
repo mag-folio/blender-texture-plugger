@@ -1216,6 +1216,69 @@ def test_uv_light_bake(module):
     check("lit-exported set: its Base Color isn't taken as albedo",
           float(lm2[lit].mean()) > 0.8 * float(lm[lit].mean()), (float(lm2[lit].mean()), float(lm[lit].mean())))
 
+    # Background bake path: several sets merged into one temporary object
+    mat2 = mat.copy()
+    mat2.name = "Ground2"
+    plane2 = plane.copy()
+    plane2.data = plane.data.copy()
+    plane2.data.materials[0] = mat2
+    plane2.location = (6, 0, 0)
+    sc.collection.objects.link(plane2)
+    sc.render.engine = engine_before
+    ents, errs = lb.bake_sets(bpy.context, [([plane], mat), ([plane2], mat2)], link, 64, None,
+                              "64", merge=True)
+    check("merged bake: both sets baked", set(ents) == {"Ground", "Ground2"} and not errs, errs)
+    img = bpy.data.images.load(os.path.join(link, ents["Ground"]["render"]), check_existing=False)
+    lm3 = np.empty(64 * 64 * 4, dtype=np.float32)
+    img.pixels.foreach_get(lm3)
+    bpy.data.images.remove(img)
+    lm3 = lm3.reshape(64, 64, 4)[..., :3].mean(axis=-1)
+    r = float(lm3[lit].mean() / lm[lit].mean())
+    check("merged bake matches the per-object bake", abs(r - 1) < 0.05, round(r, 3))
+    check("merged bake leaves nothing behind",
+          not any(o.name.startswith("TP_BakeMerge") for o in bpy.data.objects)
+          and not plane.hide_render and not plane2.hide_render
+          and not any(m.name.startswith("TP_BakeMerge") for m in bpy.data.meshes))
+
+    # A mirrored object (negative scale, like a floor scaled -22) merged with others:
+    # its faces must still face the light (it came out black)
+    lit2 = np.empty(64 * 64 * 4, dtype=np.float32)
+    img = bpy.data.images.load(os.path.join(link, ents["Ground2"]["render"]), check_existing=False)
+    img.pixels.foreach_get(lit2)
+    bpy.data.images.remove(img)
+    lit2 = float(lit2.reshape(64, 64, 4)[..., :3].mean())
+    mat3 = mat.copy()
+    mat3.name = "Ground3"
+    plane3 = plane2.copy()
+    plane3.data = plane2.data.copy()
+    plane3.data.materials[0] = mat3
+    plane3.location = (-6, 0, 0)
+    plane3.scale = (-1.0, -1.0, -1.0)          # point mirror: same plane, winding reversed
+    plane3.data.flip_normals()                 # so the mirrored plane still faces up
+    sc.collection.objects.link(plane3)
+    # an empty material slot on the same object: no faces use it, so no lightmap
+    unused = bpy.data.materials.new("Ground3Unused")
+    unused[pkg.unlit.PROJECT_KEY] = mat3.get(pkg.unlit.PROJECT_KEY, "x")
+    unused.use_nodes = True
+    plane3.data.materials.append(unused)
+    check("an empty material slot isn't baked",
+          [m.name for m in lb.bakeable_materials(plane3)] == ["Ground3"],
+          [m.name for m in lb.bakeable_materials(plane3)])
+    ents3, errs3 = lb.bake_sets(bpy.context, [([plane2], mat2), ([plane3], mat3)], link, 64,
+                                None, "64", merge=True)
+    img = bpy.data.images.load(os.path.join(link, ents3["Ground3"]["render"]), check_existing=False)
+    lm4 = np.empty(64 * 64 * 4, dtype=np.float32)
+    img.pixels.foreach_get(lm4)
+    bpy.data.images.remove(img)
+    r3 = float(lm4.reshape(64, 64, 4)[..., :3].mean()) / max(lit2, 1e-6)
+    check("merged bake: a mirrored object is lit like an unmirrored one",
+          not errs3 and abs(r3 - 1) < 0.1, (round(r3, 3), errs3))
+    bpy.data.objects.remove(plane3)
+    bpy.data.materials.remove(mat3)
+    bpy.data.materials.remove(unused)
+    bpy.data.objects.remove(plane2)
+    bpy.data.materials.remove(mat2)
+
     pl.write_lightmaps(link, {"Ground": entry})
     with open(os.path.join(link, pl.LIGHTMAPS_FILE), encoding="utf-8") as fh:
         data = json.load(fh)
