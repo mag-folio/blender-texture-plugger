@@ -7,7 +7,7 @@ you paint lit colours on top of that lighting.
 
 It covers the first setup, the daily loop, coming back to a project later, changing the
 lighting, and what to do when something looks wrong. Button names are the ones in Texture
-Plugger 1.6.4 (Blender) and its Painter plugin 1.7.1.
+Plugger 1.6.4 (Blender) and its Painter plugin 1.7.2.
 
 ## What you need
 
@@ -131,7 +131,7 @@ Moved a lamp or changed the world?
 |---|---|---|
 | Colours in Painter bluer or brighter than Blender | Those sets have no Cycles lightmap and use the environment map | Bake Lighting to UVs in Blender, then Bake Lighting (or Update Baked Lighting) in Painter |
 | Blender freezes for minutes on Bake Lighting to UVs | Blender is running an old add-on version from memory | Restart Blender after every add-on update |
-| Painter says *Save failed* (log: "Failed to load image content from file ... lightmap_render_...exr", "null surface") | A lighting map the project imported was cleaned out of the shared link folder (plugin before 1.7.1) | Painter > **Python** menu: untick and re-tick *texture_plugger_bridge* (it puts stand-in files back and checks again before every save), then save |
+| Painter says *Save failed* (log: "Failed to load image content from file ... lightmap_render_...exr", "null surface") | The project imported a lighting map that was later cleaned out of the shared link folder (plugin before 1.7.1) | Plugin 1.7.1+ copies lighting maps next to the .spp, so this no longer happens. If an older session is stuck: press **Send All Sets to Blender…** (it still exports when the save fails) to keep your newest paint, close Painter, reopen the project and use **Get All Sets from Blender…** |
 | Small objects or finely cut sets look blocky or noisy | Lightmap too small for their UV pieces (a fixed 256 px before 1.6.4) | Lightmap Size *Automatic*, 256 samples, bake again, then **Update Baked Lighting** |
 | Walls look fuzzy or grainy after Bake Lighting | Lightmaps from before 1.6.3 weren't denoised, and Painter multiplied the grain over the paint | Update, restart Blender, Bake Lighting to UVs again, then **Update Baked Lighting** in Painter |
 | A floor or other object bakes black | Mirrored objects (negative scale) faced the wrong way in the bake (fixed in 1.6.2) | Update, restart Blender, bake again |

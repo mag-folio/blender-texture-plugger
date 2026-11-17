@@ -41,7 +41,7 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "1.7.1"
+PLUGIN_VERSION = "1.7.2"
 LINK_FILE = "blender_link.json"
 LINK_DIR_NAME = "texture_plugger_link"
 FRAME_MARGIN = 1.15
@@ -533,6 +533,7 @@ def lit_updates(recorded, wanted):
 
 LIGHT_RES_PREFIX = "Blender lighting "     # name of every lighting map the plugin imports
 PROJECT_LIGHT_DIR = "blender_lighting"     # copies of them, next to the .spp
+TODO_FILE = "painter_todo.json"            # one-time jobs Blender leaves for a project
 
 
 def lighting_stem(resource_name):
@@ -1108,26 +1109,33 @@ class Bridge:
         import substance_painter.resource as rs
         if not self.project_ready():
             return 0
+        names = set()
+        for query in (getattr(rs.StandardQuery, "PROJECT_RESOURCES", "s:project!"),
+                      "Blender lighting", "lightmap_render", "env_"):
+            try:
+                for res in rs.search(query):
+                    for n in (res.identifier().name, res.gui_name()):
+                        if lighting_stem(n):
+                            names.add(n)
+            except Exception:
+                pass
         try:
-            resources = rs.search(rs.StandardQuery.PROJECT_RESOURCES)
-        except Exception as ex:
-            self.log(f"could not list the project's lighting maps: {ex}", warn=True)
-            return 0
+            for rid in rs.list_project_resources():
+                if lighting_stem(rid.name):
+                    names.add(rid.name)
+        except Exception:
+            pass
         self.reload_lightmaps()
         keep = self.project_lighting_dir()
-        fixed, lost = 0, []
-        for res in resources:
-            try:
-                stem = lighting_stem(res.identifier().name)
-            except Exception:
-                stem = None
-            if not stem:
-                continue
+        fixed, lost, ok = 0, [], 0
+        for name in sorted(names):
+            stem = lighting_stem(name)
             file_name = stem + ".exr"
             places = [os.path.join(self.link_dir, file_name)]
             if keep:
                 places.append(os.path.join(keep, file_name))
             if any(os.path.isfile(p) for p in places):
+                ok += 1
                 continue
             stand_in = replacement_for(stem, self.lightmaps, self.data)
             src = os.path.join(self.link_dir, stand_in) if stand_in else ""
@@ -1141,8 +1149,9 @@ class Bridge:
                 except OSError:
                     pass
             fixed += 1
-        if fixed:
-            self.log(f"put back {fixed} lighting map file(s) the project needs to save")
+        self.log(f"lighting maps checked: {len(names)} in the project, {ok} present, "
+                 f"{fixed} put back" + (f", {len(lost)} without a stand-in" if lost else ""),
+                 warn=bool(lost))
         if lost:
             self.log(f"no stand-in for {short_list(lost, 3)}: saving may fail; press Bake "
                      "Lighting to UVs in Blender, then save again", warn=True)
@@ -1941,6 +1950,47 @@ class Bridge:
             except Exception as ex:
                 self.log(f"scene setup failed: {ex}", warn=True)
         QtCore.QTimer.singleShot(1500, setup)      # let Painter finish loading the mesh
+        QtCore.QTimer.singleShot(4000, self.run_todo)
+
+    def run_todo(self):
+        """One-time jobs left for this project in ``painter_todo.json`` (link folder).
+
+        ``{"project": <.spp path>, "bake_lighting": true, "save": true}``: give
+        every linked set that has a Cycles lightmap its Blender Lighting layer
+        (replacing an older layer of the other kind), then save.  Used to hand
+        over a project "ready to paint" after a bake made while Painter was
+        closed.  Only a request naming the open project runs, and only once.
+        """
+        import substance_painter.project as pj
+        path = os.path.join(self.link_dir, TODO_FILE)
+        todo = read_link(path)
+        if not isinstance(todo, dict) or not self.project_ready():
+            return False
+        try:
+            here = os.path.normcase(os.path.abspath(pj.file_path() or ""))
+        except Exception:
+            here = ""
+        if not here or os.path.normcase(os.path.abspath(str(todo.get("project") or ""))) != here:
+            return False
+        try:
+            os.remove(path)                     # once, even if something below fails
+        except OSError:
+            pass
+        self.log("running the job Blender left for this project...")
+        if todo.get("bake_lighting"):
+            self.reload_lightmaps()
+            names = [n for n in match_sets(self.texture_set_names(), self.sets())
+                     if self.lightmap_for(n)]
+            self.bake_lighting(names)
+        if todo.get("save"):
+            try:
+                pj.save()
+                self.log(f"project saved with baked lighting in {len(self.lit_set_names())} "
+                         "texture set(s): ready to paint on 'Lit Paint'")
+            except Exception as ex:
+                self.log(f"could not save the project: {ex}. Save it with Ctrl+S", warn=True)
+        self.refresh_ui()
+        return True
 
     def apply_tone_mapping(self):
         """Use the Painter tone mapping that matches Blender's view transform.
@@ -2841,6 +2891,7 @@ def start_plugin():
     from PySide6 import QtWidgets
     import substance_painter.ui as ui
     _bridge = Bridge()
+    _bridge.log(f"plugin {PLUGIN_VERSION} started")
     panel = _make_panel(_bridge)
     _bridge.widget = panel
     dock = ui.add_dock_widget(panel)
