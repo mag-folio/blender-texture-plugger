@@ -336,7 +336,9 @@ preferences (the CPU is several times slower; your preferences aren't changed).
 
 Settings (add-on preferences): *Lightmap Size* (256 px by default; light needs far less
 detail than paint, and the bake time grows with the pixel count) and *UV Lighting Bake
-Samples* (128, not denoised). It includes your scene exposure. All objects that use the same
+Samples* (128). Every lightmap is then denoised with OpenImageDenoise (Blender's own denoiser,
+in a throwaway scene, well under a second per map): raw Cycles grain was multiplied over
+the paint and made walls look fuzzy. It includes your scene exposure. All objects that use the same
 texture set are baked together into one map; material slots no face uses are skipped
 (Painter makes no texture set for them). Mirrored objects (negative scale) bake the right
 way up. To bake every mesh of a .blend from a command prompt, see

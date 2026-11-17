@@ -1276,6 +1276,30 @@ def test_uv_light_bake(module):
     bpy.data.objects.remove(plane3)
     bpy.data.materials.remove(mat3)
     bpy.data.materials.remove(unused)
+
+    # Lightmaps are denoised: a low-sample bake is grainy without it ("fuzzy" walls
+    # in Painter), the same brightness with it
+    def grain(path):
+        im = bpy.data.images.load(path, check_existing=False)
+        a = np.empty(64 * 64 * 4, dtype=np.float32)
+        im.pixels.foreach_get(a)
+        bpy.data.images.remove(im)
+        a = a.reshape(64, 64, 4)[..., :3].mean(axis=-1)
+        pad = np.pad(a, 1, mode="edge")
+        blur = sum(pad[i:i + 64, j:j + 64] for i in range(3) for j in range(3)) / 9
+        m = lit & (blur > 1e-4)
+        return float(np.median(np.abs(a - blur)[m] / blur[m])), float(a[lit].mean())
+    noisy = lb.bake_lightmaps(bpy.context, [([plane], mat, os.path.join(link, "noisy.exr"), 64)],
+                              4, denoise=False)
+    clean = lb.bake_lightmaps(bpy.context, [([plane], mat, os.path.join(link, "clean.exr"), 64)],
+                              4, denoise=True)
+    (g0, m0), (g1, m1) = grain(noisy["Ground"]["path"]), grain(clean["Ground"]["path"])
+    print(f"    grain at 4 samples: {g0:.1%} raw, {g1:.1%} denoised; mean {m0:.3f} / {m1:.3f}")
+    check("denoised lightmap: far less grain, same brightness",
+          g1 < 0.5 * g0 and abs(m1 / max(m0, 1e-6) - 1) < 0.1, (round(g0, 3), round(g1, 3), m0, m1))
+    check("denoising leaves no scene or node group behind",
+          not any(s.name.startswith("TP_Denoise") for s in bpy.data.scenes)
+          and not any(g.name.startswith("TP_Denoise") for g in bpy.data.node_groups))
     bpy.data.objects.remove(plane2)
     bpy.data.materials.remove(mat2)
 

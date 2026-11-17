@@ -7,7 +7,7 @@ you paint lit colours on top of that lighting.
 
 It covers the first setup, the daily loop, coming back to a project later, changing the
 lighting, and what to do when something looks wrong. Button names are the ones in Texture
-Plugger 1.6.2 (Blender) and its Painter plugin 1.7.0.
+Plugger 1.6.3 (Blender) and its Painter plugin 1.7.0.
 
 ## What you need
 
@@ -58,7 +58,8 @@ So always bake the lightmaps:
    lighting, the Material Preview lighting, object bounds and the view.
 
 Settings (Edit > Preferences > Add-ons > Texture Plugger): *Lightmap Size* (256 px is
-plenty: light has far less detail than paint) and *UV Lighting Bake Samples* (128).
+plenty: light has far less detail than paint) and *UV Lighting Bake Samples* (128). Lightmaps are denoised
+automatically.
 
 ### Without opening Blender's window
 
@@ -125,6 +126,7 @@ Moved a lamp or changed the world?
 |---|---|---|
 | Colours in Painter bluer or brighter than Blender | Those sets have no Cycles lightmap and use the environment map | Bake Lighting to UVs in Blender, then Bake Lighting (or Update Baked Lighting) in Painter |
 | Blender freezes for minutes on Bake Lighting to UVs | Blender is running an old add-on version from memory | Restart Blender after every add-on update |
+| Walls look fuzzy or grainy after Bake Lighting | Lightmaps from before 1.6.3 weren't denoised, and Painter multiplied the grain over the paint | Update, restart Blender, Bake Lighting to UVs again, then **Update Baked Lighting** in Painter |
 | A floor or other object bakes black | Mirrored objects (negative scale) faced the wrong way in the bake (fixed in 1.6.2) | Update, restart Blender, bake again |
 | `Cycles lightmap (outdated)` in the list | Lamps or world changed after the bake | Bake again in Blender, then Update Baked Lighting |
 | Get from Blender loads nothing | Blender only has blank placeholders for those sets | Nothing to load yet: paint and Send to Blender first |

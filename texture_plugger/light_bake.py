@@ -396,7 +396,74 @@ class _Setup:
         return False
 
 
-def bake_lightmaps(context, jobs, samples, world=None, lamps=True, exposure=None, merge=False):
+def denoise_pixels(img):
+    """The image denoised with OpenImageDenoise, as a float32 (h, w, 4) array, or None.
+
+    Cycles' bake isn't denoised: at 128 samples a wall's lightmap had 15-23% grain
+    from pixel to pixel, which Painter multiplied over the paint ("fuzzy" walls).
+    OIDN takes it to about 1% with the brightness unchanged (measured), in well
+    under a second.  It runs in a throwaway scene's compositor, so the user's own
+    scene and compositor are never touched.
+    """
+    import shutil
+    import numpy as np
+    w, h = img.size
+    tmp = tempfile.mkdtemp(prefix="tp_denoise_")
+    out = os.path.join(tmp, "denoised.exr")
+    sc = bpy.data.scenes.new("TP_Denoise")
+    group = None
+    try:
+        if hasattr(sc, "compositing_node_group"):            # Blender 5.0+
+            group = bpy.data.node_groups.new("TP_Denoise", "CompositorNodeTree")
+            sc.compositing_node_group = group
+            group.interface.new_socket("Image", in_out="OUTPUT", socket_type="NodeSocketColor")
+            tree, end = group, group.nodes.new("NodeGroupOutput")
+        else:                                                # Blender 4.x
+            sc.use_nodes = True
+            tree = sc.node_tree
+            for n in list(tree.nodes):
+                tree.nodes.remove(n)
+            end = tree.nodes.new("CompositorNodeComposite")
+        src = tree.nodes.new("CompositorNodeImage")
+        src.image = img
+        dn = tree.nodes.new("CompositorNodeDenoise")
+        tree.links.new(src.outputs["Image"], dn.inputs["Image"])
+        tree.links.new(dn.outputs[0], end.inputs[0])
+        r = sc.render
+        r.resolution_x, r.resolution_y, r.resolution_percentage = w, h, 100
+        r.use_compositing = True
+        r.image_settings.file_format = "OPEN_EXR"
+        r.image_settings.color_depth = "32"
+        r.filepath = out
+        bpy.ops.render.render(write_still=True, scene=sc.name)
+        res = bpy.data.images.load(out, check_existing=False)
+        try:
+            if tuple(res.size) != (w, h):
+                return None
+            px = np.empty(w * h * 4, dtype=np.float32)
+            res.pixels.foreach_get(px)
+            px = px.reshape(h, w, 4)
+            return px if np.isfinite(px).all() else None
+        finally:
+            bpy.data.images.remove(res)
+    except Exception as ex:          # never lose a bake over its clean-up
+        print(f"Texture Plugger: lightmap not denoised ({ex})")
+        return None
+    finally:
+        try:
+            bpy.data.scenes.remove(sc)
+        except Exception:
+            pass
+        if group is not None:
+            try:
+                bpy.data.node_groups.remove(group)
+            except Exception:
+                pass
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def bake_lightmaps(context, jobs, samples, world=None, lamps=True, exposure=None, merge=False,
+                   denoise=True):
     """Bake several texture sets in ONE Cycles bake and write each to an EXR.
 
     ``jobs``: [(objects, material, out_path, size)].  Values are Cycles' Diffuse
@@ -440,6 +507,15 @@ def bake_lightmaps(context, jobs, samples, world=None, lamps=True, exposure=None
             except (AttributeError, TypeError):
                 pass
             img.pixels.foreach_set(px.ravel())
+            if denoise:
+                dn = denoise_pixels(img)
+                if dn is not None:
+                    # only where the bake wrote light (islands + margin): the empty
+                    # rest stays exactly black
+                    inside = px[..., :3].max(axis=-1) > 0.0
+                    px[..., :3] = np.where(inside[..., None], np.maximum(dn[..., :3], 0.0),
+                                           px[..., :3])
+                    img.pixels.foreach_set(px.ravel())
             img.filepath_raw = path
             img.file_format = "OPEN_EXR"
             img.save()
