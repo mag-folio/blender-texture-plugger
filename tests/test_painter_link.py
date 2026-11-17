@@ -401,5 +401,104 @@ class Framing(unittest.TestCase):
         self.assertGreater(br.box_center_radius([1, 1, 1], [1, 1, 1])[1], 0)
 
 
+class Lightmaps(unittest.TestCase):
+    """Cycles UV lightmaps: Blender's file and the plugin's choice of map."""
+
+    def test_names_and_merge(self):
+        self.assertEqual(pl.lightmap_name("Mat.001 a/b", "render", 12.7),
+                         "lightmap_render_Mat.001_a_b_12.exr")
+        old = {"sets": {"A": {"render": "lightmap_render_A_1.exr", "preview": "lightmap_preview_A_1.exr"},
+                        "B": {"render": "lightmap_render_B_1.exr"}}}
+        new = pl.merge_lightmaps(old, {"A": {"render": "lightmap_render_A_2.exr", "preview": None}})
+        self.assertEqual(new["sets"]["A"], {"render": "lightmap_render_A_2.exr"})   # old preview dropped
+        self.assertEqual(new["sets"]["B"]["render"], "lightmap_render_B_1.exr")
+        self.assertEqual(pl.referenced_lightmaps(new),
+                         {"lightmap_render_A_2.exr", "lightmap_render_B_1.exr"})
+        self.assertEqual(pl.LIGHTMAPS_FILE, br.LIGHTMAPS_FILE)
+        self.assertEqual(pl.LIGHTMAP_PREFIX, br.LIGHTMAP_PREFIX)
+
+    def test_write_prunes_unused(self):
+        d = tempfile.mkdtemp(prefix="tp_lm_")
+        try:
+            for n in ("lightmap_render_A_1.exr", "lightmap_render_A_2.exr", "env_1.exr"):
+                open(os.path.join(d, n), "wb").close()
+            # while a bake runs: listed incrementally, nothing deleted
+            pl.write_lightmaps(d, {"A": {"render": "lightmap_render_A_2.exr"}}, prune=False)
+            self.assertEqual(len([n for n in os.listdir(d) if n.endswith(".exr")]), 3)
+            pl.write_lightmaps(d, {"B": {"render": "lightmap_render_B_1.exr"}}, prune=False)
+            self.assertEqual(set(pl.read_link(os.path.join(d, pl.LIGHTMAPS_FILE))["sets"]), {"A", "B"})
+            pl.write_lightmaps(d, {})          # at the end: unused maps go
+            self.assertEqual(sorted(os.listdir(d)),
+                             [pl.LIGHTMAPS_FILE, "env_1.exr", "lightmap_render_A_2.exr"])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_pick_lightmap(self):
+        data = {"sets": {"Crate": {"render": "lightmap_render_Crate_1.exr",
+                                   "preview": "lightmap_preview_Crate_1.exr"},
+                         "Wall": {"render": "lightmap_render_Wall_1.exr"}}}
+        self.assertEqual(br.pick_lightmap(data, "Crate", "preview"), "lightmap_preview_Crate_1.exr")
+        self.assertEqual(br.pick_lightmap(data, "crate", "render"), "lightmap_render_Crate_1.exr")
+        self.assertIsNone(br.pick_lightmap(data, "Wall", "preview"))   # filter + preview map instead
+        self.assertIsNone(br.pick_lightmap(data, "Floor"))
+        self.assertIsNone(br.pick_lightmap(None, "Crate"))
+        self.assertTrue(br.is_lightmap("lightmap_render_Crate_1.exr"))
+        entry = {"render": "lightmap_render_Crate_1.exr", "lighting_key": "k1", "time": 100.0}
+        self.assertFalse(br.lightmap_outdated(entry, {"lighting_key": "k1", "stamp": 200.0}))
+        self.assertTrue(br.lightmap_outdated(entry, {"lighting_key": "k2", "stamp": 200.0}))
+        self.assertFalse(br.lightmap_outdated(entry, {"lighting_key": "k2", "stamp": 50.0}))  # bake is newer
+        self.assertFalse(br.lightmap_outdated(entry, None))
+        self.assertFalse(br.lightmap_outdated({"render": "x"}, {"lighting_key": "k2", "stamp": 200.0}))
+        self.assertFalse(br.is_lightmap("env_123.exr"))
+
+
+class BakedLighting(unittest.TestCase):
+    """The Painter plugin's "Bake Lighting" bookkeeping and the marker for Blender."""
+
+    def test_file_stem(self):
+        for path, want in (("C:\\t\\Crate_BaseColor.png", "crate_basecolor"),
+                           ("/t/Crate_BaseColor.1001.png", "crate_basecolor"),
+                           ("Crate_BaseColor.<UDIM>.png", "crate_basecolor"),
+                           ("Crate_BaseColor_sRGB.png", "crate_basecolor_srgb"),
+                           ("Wall_2024_BaseColor.png", "wall_2024_basecolor"),
+                           ("Material.001_BaseColor.png", "material.001_basecolor")):
+            self.assertEqual(br.file_stem(path), want, path)
+
+    def test_base_color_stem(self):
+        files = ["/t/Crate_Normal.png", "/t/Crate_BaseColor.png", "/t/Crate_Roughness.png"]
+        self.assertEqual(br.base_color_stem("Crate", files), "crate_basecolor")
+        self.assertEqual(br.base_color_stem("Crate", ["/t/Crate_BaseColor.1001.png"]), "crate_basecolor")
+        self.assertEqual(br.base_color_stem("Crate", []), "crate_basecolor")    # usual name
+
+    def test_merge_marker_keeps_other_sets(self):
+        old = {"version": 1, "sets": {"A": {"lit": True, "base_color": "a_basecolor"},
+                                      "B": {"lit": True, "base_color": "b_basecolor"}}}
+        new = br.merge_lit_marker(old, {"B": {"lit": False, "base_color": "b_basecolor"},
+                                        "C": {"lit": True, "base_color": "c_basecolor"}})
+        self.assertEqual(new["sets"]["A"]["lit"], True)        # not exported: unchanged
+        self.assertEqual(new["sets"]["B"]["lit"], False)       # exported without lighting
+        self.assertEqual(new["sets"]["C"]["lit"], True)
+        self.assertEqual(br.merge_lit_marker(None, {})["sets"], {})
+        self.assertEqual(br.merge_lit_marker({"sets": "junk"}, {})["sets"], {})
+
+    def test_lit_updates(self):
+        rec = {"A": "env_1.exr", "B": "env_2.exr", "C": "env_3.exr"}
+        wanted = {"A": "env_1.exr", "B": "env_9.exr", "C": None}
+        self.assertEqual(br.lit_updates(rec, wanted), ["B"])
+        self.assertEqual(br.lit_updates({}, wanted), [])
+
+    def test_marker_round_trip(self):
+        d = tempfile.mkdtemp(prefix="tp_lit_")
+        try:
+            path = os.path.join(d, br.LIT_MARKER)
+            br.write_json(path, br.merge_lit_marker(None, {"Crate": {
+                "lit": True, "base_color": br.base_color_stem("Crate", ["Crate_BaseColor.png"])}}))
+            data = br.read_link(path)
+            self.assertEqual(data["sets"]["Crate"], {"lit": True, "base_color": "crate_basecolor"})
+            self.assertFalse(os.path.exists(path + ".tmp"))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

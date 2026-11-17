@@ -31,6 +31,11 @@ $zip = Get-ChildItem "$root\dist\texture_plugger-*.zip" | Sort-Object LastWriteT
 $sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("tp_blender_user_" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force $sandbox | Out-Null
 $env:BLENDER_USER_RESOURCES = $sandbox
+# Never let a test write Painter's real link folder or installed plugin: tests that
+# press Edit in Painter / Send to Painter would overwrite the user's scene lighting.
+$env:TP_PAINTER_USER_DIR = Join-Path $sandbox "painter_user"
+$setLink = -not $env:TP_LINK_DIR
+if ($setLink) { $env:TP_LINK_DIR = Join-Path $sandbox "painter_user\texture_plugger_link" }
 try {
     if ($Legacy) {
         $addons = Join-Path $sandbox "scripts\addons"
@@ -47,6 +52,8 @@ try {
     $code = $LASTEXITCODE
 } finally {
     Remove-Item Env:\BLENDER_USER_RESOURCES -ErrorAction SilentlyContinue
+    Remove-Item Env:\TP_PAINTER_USER_DIR -ErrorAction SilentlyContinue
+    if ($setLink) { Remove-Item Env:\TP_LINK_DIR -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $sandbox -ErrorAction SilentlyContinue
 }
 exit $code

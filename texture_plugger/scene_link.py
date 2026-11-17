@@ -27,7 +27,7 @@ import bpy
 from bpy.props import BoolProperty
 from mathutils import Vector
 
-from . import painter_link, prefs
+from . import painter_link, prefs, unlit
 from .operators import _safe
 
 PLUGIN_NAME = "texture_plugger_bridge.py"
@@ -549,7 +549,7 @@ def bake_environment(context, target, out_path, width=1024, samples=64,
         env[rows, cols] += np.asarray(rad, dtype=np.float32)
 
     # 3) exposure, Painter's orientation
-    exposure = float(getattr(src.view_settings, "exposure", 0.0))
+    exposure = float(unlit.user_view(src)["exposure"])     # not the unlit Standard switch
     env *= 2.0 ** exposure
     if painter_link.ENV_MIRROR:
         env = env[:, ::-1]
@@ -789,7 +789,14 @@ def sets_payload(context):
 # --------------------------------------------------------------------------
 
 def painter_documents():
-    """Painter's user folder (Documents/Adobe/Adobe Substance 3D Painter)."""
+    """Painter's user folder (Documents/Adobe/Adobe Substance 3D Painter).
+
+    ``TP_PAINTER_USER_DIR`` overrides it (the test runner points it at a
+    sandbox, so tests never touch the real link folder or installed plugin).
+    """
+    override = os.environ.get("TP_PAINTER_USER_DIR")
+    if override:
+        return override
     docs = ""
     if sys.platform == "win32":
         try:
@@ -907,7 +914,7 @@ def lighting_key(context, surroundings=True):
     """
     import hashlib
     sc = context.scene
-    parts = [("exposure", _value(getattr(sc.view_settings, "exposure", 0.0))),
+    parts = [("exposure", _value(unlit.user_view(sc)["exposure"])),
              ("surroundings", bool(surroundings))]
     w = sc.world
     parts.append(("world", w.name_full if w else None))
@@ -959,7 +966,7 @@ def send(context, target, lighting=True, view=True, scene=None):
                                 samples, min_deg, surroundings)
         if context.scene.world is None and info["lights"] == 0:
             warnings.append("The scene has no world and no lights: the map is black")
-        vt = getattr(context.scene.view_settings, "view_transform", "")
+        vt = unlit.user_view(context.scene)["view_transform"]
         tone = painter_link.tone_mapping_for(vt)
         if with_preview:
             pv_name = f"env_preview_{int(time.time() * 1000)}.exr"

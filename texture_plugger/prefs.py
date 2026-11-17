@@ -76,6 +76,11 @@ def option_annotations():
 OPTION_NAMES = tuple(option_annotations().keys())
 
 
+def _unlit_changed(_self, _context):
+    from . import unlit      # imports prefs itself
+    unlit.mark_dirty()
+
+
 def kw_prop_name(type_id):
     return "kw_" + type_id
 
@@ -156,6 +161,31 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         description="Also send the viewport's Material Preview lighting (its studio HDRI, "
                     "rotation and strength), so Painter can switch between it and the "
                     "render lighting")
+    lightmap_size: EnumProperty(
+        name="Lightmap Size", default="AUTO",
+        items=(("AUTO", "Automatic",
+                "Each set's own texture size (one light pixel per paint pixel), larger for sets "
+                "with tiny UV pieces so even those get enough pixels (up to 2048 px)"),
+               ("128", "128 px", "Fastest"), ("256", "256 px", "Balanced"),
+               ("512", "512 px", "Sharper shadows, 4x the bake time of 256"),
+               ("1024", "1024 px", "Very sharp, 16x the bake time of 256"),
+               ("SET", "Texture Set Size", "Same size as the painted textures (slowest)")),
+        description="Size of the lighting baked onto each texture set's UVs. Light needs far "
+                    "less detail than paint: Painter stretches it smoothly over the set")
+    bake_samples: IntProperty(
+        name="UV Lighting Bake Samples", default=256, min=8, max=8192,
+        description="Cycles samples for Bake Lighting to UVs. The result is denoised; raise "
+                    "it if objects in deep shadow still look grainy")
+    unlit_from_painter: BoolProperty(
+        name="Show Painter-Lit Textures Unlit", default=True, update=_unlit_changed,
+        description="Texture sets lit with Bake Lighting in Painter carry their lighting in "
+                    "the Base Color: show them with emission only (Base Color -> Emission), "
+                    "so Blender's lights don't light them twice")
+    unlit_view_transform: BoolProperty(
+        name="Standard View for Unlit", default=True, update=_unlit_changed,
+        description="Scenes showing such materials use the Standard view transform (no "
+                    "tone mapping, exposure 0) so colours look exactly as painted; the "
+                    "previous settings come back when none are left")
 
     def draw(self, context):
         layout = self.layout
@@ -192,6 +222,10 @@ class TexturePluggerPreferences(bpy.types.AddonPreferences):
         grid.prop(self, "light_min_size")
         grid.prop(self, "env_surroundings")
         grid.prop(self, "env_preview")
+        grid.prop(self, "lightmap_size")
+        grid.prop(self, "bake_samples")
+        grid.prop(self, "unlit_from_painter")
+        grid.prop(self, "unlit_view_transform")
         box.operator("texture_plugger.install_painter_plugin", icon="IMPORT")
 
         box = col.box()

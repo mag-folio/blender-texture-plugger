@@ -1026,6 +1026,302 @@ def test_brushstroke_objects_target_surface(module):
           and bpy.context.view_layer.objects.active == flow)
 
 
+def test_unlit_from_painter(module):
+    """Painter's Bake Lighting marker switches a set to emission only, and back."""
+    print("\n[unlit: lighting baked in Painter]")
+    import importlib
+    import json
+    pkg = importlib.import_module(module)
+    nb, un = pkg.node_builder, pkg.unlit
+    folder = os.path.join(TMP, "unlit", "Crate")
+    tex = os.path.join(folder, "textures")
+    make_image(tex, "Crate_BaseColor.png", (0.8, 0.2, 0.1, 1.0))
+    make_image(tex, "Crate_Opacity.png", (1.0, 1.0, 1.0, 1.0))
+    ob = new_cube("UnlitCube", (6, 0, 0))
+    mat = bpy.data.materials.new("Crate")
+    ob.data.materials.append(mat)
+    maps = {"base_color": nb.MapInput(os.path.join(tex, "Crate_BaseColor.png")),
+            "opacity": nb.MapInput(os.path.join(tex, "Crate_Opacity.png"))}
+    nb.build_material(mat, maps, nb.BuildOptions(), "Crate")
+    mat["texture_plugger_project"] = folder
+    vs = bpy.context.scene.view_settings
+    vs.view_transform, vs.exposure = "AgX", 1.5
+    marker = os.path.join(tex, un.LIT_MARKER)
+
+    def write(lit):
+        with open(marker, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "sets": {"Crate": {"lit": lit, "base_color": "crate_basecolor"}}}, fh)
+        un._markers.clear()        # same-second rewrites keep the same mtime on some disks
+
+    un.sync()
+    check("no marker: stays lit", not nb.is_unlit(mat))
+    key_before = pkg.scene_link.lighting_key(bpy.context)
+    write(True)
+    un.sync()
+    check("Standard switch doesn't change the lighting sent to Painter",
+          pkg.scene_link.lighting_key(bpy.context) == key_before
+          and un.user_view(bpy.context.scene)["exposure"] == 1.5
+          and un.user_view(bpy.context.scene)["view_transform"] == "AgX")
+    out = nb.find_output(mat.node_tree)
+    surf = out.inputs["Surface"]
+    em = mat.node_tree.nodes.get("TP Unlit (lighting baked in Painter)")
+    check("marked lit: emission drives the output", nb.is_unlit(mat) and em is not None)
+    check("emission reads the Base Color image",
+          em is not None and em.inputs["Color"].is_linked
+          and em.inputs["Color"].links[0].from_node == nb.base_color_node(mat.node_tree))
+    check("alpha kept through a mix with Transparent",
+          surf.is_linked and surf.links[0].from_node.bl_idname == "ShaderNodeMixShader")
+    check("view transform Standard, exposure 0",
+          vs.view_transform == "Standard" and abs(vs.exposure) < 1e-6, (vs.view_transform, vs.exposure))
+    check("unlit status for the panel", "1 material" in un.last_status, un.last_status)
+    check("second sync changes nothing", un.sync() == [])
+
+    nb.build_material(mat, maps, nb.BuildOptions(), "Crate")      # e.g. Apply again
+    bsdf = nb.find_principled(mat.node_tree, nb.find_output(mat.node_tree))
+    check("rebuild puts the Principled back first",
+          not nb.is_unlit(mat) and surf.links[0].from_node == bsdf)
+    un.sync()
+    check("sync makes it unlit again after a rebuild", nb.is_unlit(mat))
+
+    write(False)
+    un.sync()
+    check("exported without lighting: Principled back on the output",
+          not nb.is_unlit(mat) and surf.is_linked and surf.links[0].from_node == bsdf
+          and not any(str(n.get("texture_plugger", "")).startswith("unlit") for n in mat.node_tree.nodes))
+    check("view transform restored", vs.view_transform == "AgX" and abs(vs.exposure - 1.5) < 1e-6,
+          (vs.view_transform, vs.exposure))
+
+    write(True)
+    un.sync()
+    nb.clear_material(mat)
+    check("clear while unlit leaves a valid surface",
+          surf.is_linked and surf.links[0].from_node.bl_idname == "ShaderNodeBsdfPrincipled")
+    un.sync()
+    check("view restored once nothing is unlit", vs.view_transform == "AgX", vs.view_transform)
+    bpy.data.objects.remove(ob)
+    bpy.data.materials.remove(mat)
+
+
+def test_uv_light_bake(module):
+    """Bake Lighting to UVs: the lightmap has the cast shadow and matches a Cycles render."""
+    print("\n[Bake Lighting to UVs (Cycles lightmap)]")
+    import importlib
+    import json
+    import math
+    import numpy as np
+    pkg = importlib.import_module(module)
+    nb, lb, pl = pkg.node_builder, pkg.light_bake, pkg.painter_link
+    sc = bpy.context.scene
+    for o in list(sc.objects):
+        o.hide_render = True          # earlier tests' objects stay out of the light
+    sc.render.engine = "BLENDER_EEVEE" if "BLENDER_EEVEE" in {
+        i.identifier for i in sc.render.bl_rna.properties["engine"].enum_items} else sc.render.engine
+    engine_before = sc.render.engine
+    sc.view_settings.view_transform, sc.view_settings.exposure = "Standard", 0.0
+    sc.world = None
+    folder = os.path.join(TMP, "uvbake", "Ground")
+    tex = os.path.join(folder, "textures")
+    make_image(tex, "Ground_BaseColor.png", (0.8, 0.8, 0.8, 1.0))
+    bpy.ops.mesh.primitive_plane_add(size=2.0, location=(0, 0, 0))
+    plane = bpy.context.active_object
+    plane.name = "BakeGround"
+    mat = bpy.data.materials.new("Ground")
+    plane.data.materials.append(mat)
+    nb.build_material(mat, {"base_color": nb.MapInput(os.path.join(tex, "Ground_BaseColor.png"))},
+                      nb.BuildOptions(), "Ground")
+    mat["texture_plugger_project"] = folder
+    bsdf = nb.find_principled(mat.node_tree, nb.find_output(mat.node_tree))
+    nb.set_input(bsdf, ("Specular IOR Level", "Specular"), 0.0)
+    nb.set_input(bsdf, ("Roughness",), 1.0)
+    links_before = len(mat.node_tree.links)
+    nodes_before = len(mat.node_tree.nodes)
+    blocker = new_cube("BakeBlocker", (0.45, 0.45, 0.5))
+    blocker.scale = (0.5, 0.5, 0.5)
+    sun_d = bpy.data.lights.new("BakeSun", "SUN")
+    sun_d.energy = 2.0
+    sun_d.angle = 0.0
+    sun = bpy.data.objects.new("BakeSun", sun_d)
+    sun.rotation_euler = (math.radians(20), 0.0, 0.0)
+    sc.collection.objects.link(sun)
+    other = new_cube("BakeOther", (5, 5, 5))      # selected before: must stay selected
+    select_only(other)
+    link = os.path.join(TMP, "uvbake", "link")
+    os.makedirs(link, exist_ok=True)
+
+    entry = lb.bake_set(bpy.context, plane, mat, link, size=64, samples=64, preview=False)
+    path = os.path.join(link, entry["render"])
+    check("lightmap written", os.path.isfile(path), entry)
+    check("scene put back: engine, selection, active",
+          sc.render.engine == engine_before and other.select_get() and not plane.select_get()
+          and bpy.context.view_layer.objects.active == other, sc.render.engine)
+    out = nb.find_output(mat.node_tree)
+    check("material put back exactly",
+          len(mat.node_tree.links) == links_before and len(mat.node_tree.nodes) == nodes_before
+          and out.inputs["Surface"].links[0].from_node == bsdf)
+
+    img = bpy.data.images.load(path, check_existing=False)
+    lm = np.empty(64 * 64 * 4, dtype=np.float32)
+    img.pixels.foreach_get(lm)
+    bpy.data.images.remove(img)
+    lm = lm.reshape(64, 64, 4)[..., :3].mean(axis=-1)
+    inner = np.zeros((64, 64), bool)
+    inner[4:-4, 4:-4] = True
+    top = float(np.percentile(lm[inner], 95))
+    lit = inner & (lm > 0.8 * top)
+    shadow = inner & (lm < 0.3 * top)
+    check("cast shadow is in the lightmap", lit.sum() > 200 and shadow.sum() > 40,
+          (int(lit.sum()), int(shadow.sum()), top))
+
+    # Cycles render from straight above: render = albedo x lightmap everywhere
+    cd = bpy.data.cameras.new("BakeCam")
+    cd.type = "ORTHO"
+    cd.ortho_scale = 2.0
+    cam = bpy.data.objects.new("BakeCam", cd)
+    cam.location = (0, 0, 5)
+    sc.collection.objects.link(cam)
+    blocker.visible_camera = False  # the camera sees the ground; the cube still casts its shadow
+    sc.camera = cam
+    sc.render.engine = "CYCLES"
+    sc.cycles.samples = 64
+    sc.render.resolution_x = sc.render.resolution_y = 64
+    sc.render.resolution_percentage = 100
+    sc.render.image_settings.file_format = "OPEN_EXR"
+    sc.render.filepath = os.path.join(TMP, "uvbake", "ref.exr")
+    bpy.ops.render.render(write_still=True)
+    ref_img = bpy.data.images.load(sc.render.filepath, check_existing=False)
+    ref = np.empty(64 * 64 * 4, dtype=np.float32)
+    ref_img.pixels.foreach_get(ref)
+    bpy.data.images.remove(ref_img)
+    ref = ref.reshape(64, 64, 4)[..., :3].mean(axis=-1)
+    r_lit = float(ref[lit].mean() / lm[lit].mean())
+    r_shadow = float(ref[shadow].mean() / max(lm[shadow].mean(), 1e-6))
+    print(f"    render / lightmap: lit {r_lit:.3f}, shadow {r_shadow:.3f} (albedo 0.604)")
+    check("lightmap matches the Cycles render in light and shadow (same albedo ratio)",
+          abs(r_shadow / r_lit - 1.0) < 0.2 and 0.3 < r_lit < 0.9, (round(r_lit, 3), round(r_shadow, 3)))
+
+    # A set exported with baked lighting: its Base Color is albedo x light, never used
+    # as albedo (a black patch would divide to nothing)
+    make_image(tex, "Ground_BaseColor.png", (0.0, 0.0, 0.0, 1.0))
+    nb.base_color_node(mat.node_tree).image.reload()
+    with open(os.path.join(tex, "texture_plugger_lit.json"), "w", encoding="utf-8") as fh:
+        json.dump({"sets": {"Ground": {"lit": True, "base_color": "ground_basecolor"}}}, fh)
+    pkg.unlit._markers.clear()
+    sc.render.engine = engine_before
+    e2 = lb.bake_set(bpy.context, plane, mat, link, size=64, samples=32, preview=False)
+    img = bpy.data.images.load(os.path.join(link, e2["render"]), check_existing=False)
+    lm2 = np.empty(64 * 64 * 4, dtype=np.float32)
+    img.pixels.foreach_get(lm2)
+    bpy.data.images.remove(img)
+    lm2 = lm2.reshape(64, 64, 4)[..., :3].mean(axis=-1)
+    check("lit-exported set: its Base Color isn't taken as albedo",
+          float(lm2[lit].mean()) > 0.8 * float(lm[lit].mean()), (float(lm2[lit].mean()), float(lm[lit].mean())))
+
+    # Background bake path: several sets merged into one temporary object
+    mat2 = mat.copy()
+    mat2.name = "Ground2"
+    plane2 = plane.copy()
+    plane2.data = plane.data.copy()
+    plane2.data.materials[0] = mat2
+    plane2.location = (6, 0, 0)
+    sc.collection.objects.link(plane2)
+    sc.render.engine = engine_before
+    ents, errs = lb.bake_sets(bpy.context, [([plane], mat), ([plane2], mat2)], link, 64, None,
+                              "64", merge=True)
+    check("merged bake: both sets baked", set(ents) == {"Ground", "Ground2"} and not errs, errs)
+    img = bpy.data.images.load(os.path.join(link, ents["Ground"]["render"]), check_existing=False)
+    lm3 = np.empty(64 * 64 * 4, dtype=np.float32)
+    img.pixels.foreach_get(lm3)
+    bpy.data.images.remove(img)
+    lm3 = lm3.reshape(64, 64, 4)[..., :3].mean(axis=-1)
+    r = float(lm3[lit].mean() / lm[lit].mean())
+    check("merged bake matches the per-object bake", abs(r - 1) < 0.05, round(r, 3))
+    check("merged bake leaves nothing behind",
+          not any(o.name.startswith("TP_BakeMerge") for o in bpy.data.objects)
+          and not plane.hide_render and not plane2.hide_render
+          and not any(m.name.startswith("TP_BakeMerge") for m in bpy.data.meshes))
+
+    # A mirrored object (negative scale, like a floor scaled -22) merged with others:
+    # its faces must still face the light (it came out black)
+    lit2 = np.empty(64 * 64 * 4, dtype=np.float32)
+    img = bpy.data.images.load(os.path.join(link, ents["Ground2"]["render"]), check_existing=False)
+    img.pixels.foreach_get(lit2)
+    bpy.data.images.remove(img)
+    lit2 = float(lit2.reshape(64, 64, 4)[..., :3].mean())
+    mat3 = mat.copy()
+    mat3.name = "Ground3"
+    plane3 = plane2.copy()
+    plane3.data = plane2.data.copy()
+    plane3.data.materials[0] = mat3
+    plane3.location = (-6, 0, 0)
+    plane3.scale = (-1.0, -1.0, -1.0)          # point mirror: same plane, winding reversed
+    plane3.data.flip_normals()                 # so the mirrored plane still faces up
+    sc.collection.objects.link(plane3)
+    # an empty material slot on the same object: no faces use it, so no lightmap
+    unused = bpy.data.materials.new("Ground3Unused")
+    unused[pkg.unlit.PROJECT_KEY] = mat3.get(pkg.unlit.PROJECT_KEY, "x")
+    unused.use_nodes = True
+    plane3.data.materials.append(unused)
+    check("an empty material slot isn't baked",
+          [m.name for m in lb.bakeable_materials(plane3)] == ["Ground3"],
+          [m.name for m in lb.bakeable_materials(plane3)])
+    ents3, errs3 = lb.bake_sets(bpy.context, [([plane2], mat2), ([plane3], mat3)], link, 64,
+                                None, "64", merge=True)
+    img = bpy.data.images.load(os.path.join(link, ents3["Ground3"]["render"]), check_existing=False)
+    lm4 = np.empty(64 * 64 * 4, dtype=np.float32)
+    img.pixels.foreach_get(lm4)
+    bpy.data.images.remove(img)
+    r3 = float(lm4.reshape(64, 64, 4)[..., :3].mean()) / max(lit2, 1e-6)
+    check("merged bake: a mirrored object is lit like an unmirrored one",
+          not errs3 and abs(r3 - 1) < 0.1, (round(r3, 3), errs3))
+    bpy.data.objects.remove(plane3)
+    bpy.data.materials.remove(mat3)
+    bpy.data.materials.remove(unused)
+
+    # Lightmaps are denoised: a low-sample bake is grainy without it ("fuzzy" walls
+    # in Painter), the same brightness with it
+    def grain(path):
+        im = bpy.data.images.load(path, check_existing=False)
+        a = np.empty(64 * 64 * 4, dtype=np.float32)
+        im.pixels.foreach_get(a)
+        bpy.data.images.remove(im)
+        a = a.reshape(64, 64, 4)[..., :3].mean(axis=-1)
+        pad = np.pad(a, 1, mode="edge")
+        blur = sum(pad[i:i + 64, j:j + 64] for i in range(3) for j in range(3)) / 9
+        m = lit & (blur > 1e-4)
+        return float(np.median(np.abs(a - blur)[m] / blur[m])), float(a[lit].mean())
+    noisy = lb.bake_lightmaps(bpy.context, [([plane], mat, os.path.join(link, "noisy.exr"), 64)],
+                              4, denoise=False)
+    clean = lb.bake_lightmaps(bpy.context, [([plane], mat, os.path.join(link, "clean.exr"), 64)],
+                              4, denoise=True)
+    (g0, m0), (g1, m1) = grain(noisy["Ground"]["path"]), grain(clean["Ground"]["path"])
+    print(f"    grain at 4 samples: {g0:.1%} raw, {g1:.1%} denoised; mean {m0:.3f} / {m1:.3f}")
+    check("denoised lightmap: far less grain, same brightness",
+          g1 < 0.5 * g0 and abs(m1 / max(m0, 1e-6) - 1) < 0.1, (round(g0, 3), round(g1, 3), m0, m1))
+    # Automatic lightmap size: the set's texture size, more for tiny UV pieces
+    check("auto size: one big UV piece gets the texture size",
+          lb.set_size(mat, "AUTO", 512, [plane]) == 512, lb.set_size(mat, "AUTO", 512, [plane]))
+    check("auto size: tiny pieces get more pixels, capped",
+          lb.auto_size([0.5] + [3e-4] * 20, 512) == 1024
+          and lb.auto_size([1e-4] * 20, 512) == 2048 and lb.auto_size([1e-4] * 20, 4096) == 2048
+          and lb.auto_size([0.9, 1e-9, 1e-9], 512) == 512,
+          (lb.auto_size([0.5] + [3e-4] * 20, 512), lb.auto_size([1e-4] * 20, 512)))
+    check("denoising leaves no scene or node group behind",
+          not any(s.name.startswith("TP_Denoise") for s in bpy.data.scenes)
+          and not any(g.name.startswith("TP_Denoise") for g in bpy.data.node_groups))
+    bpy.data.objects.remove(plane2)
+    bpy.data.materials.remove(mat2)
+
+    pl.write_lightmaps(link, {"Ground": entry})
+    with open(os.path.join(link, pl.LIGHTMAPS_FILE), encoding="utf-8") as fh:
+        data = json.load(fh)
+    check("lightmaps file lists the set", data["sets"]["Ground"]["render"] == entry["render"])
+
+    for o in (plane, blocker, other, sun, cam):
+        bpy.data.objects.remove(o)
+    bpy.data.materials.remove(mat)
+    sc.render.engine = engine_before
+
+
 def test_disable_enable(module):
     print("\n[disable / re-enable]")
     try:
@@ -1054,6 +1350,8 @@ def main():
         test_create_and_paint(module)
         test_undo_cannot_break_link(module)
         test_brushstroke_objects_target_surface(module)
+        test_unlit_from_painter(module)
+        test_uv_light_bake(module)
         test_disable_enable(module)
     except Exception:
         traceback.print_exc()

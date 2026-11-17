@@ -436,11 +436,119 @@ def clear_material(mat, purge=True) -> int:
     if mat is None or mat.node_tree is None:
         return 0
     images = managed_images(mat.node_tree)
+    had_unlit = bool(_unlit_nodes(mat.node_tree))
     removed = remove_managed_nodes(mat.node_tree)
+    if had_unlit:
+        _relink_principled(mat.node_tree)
     _restore_originals(mat)
     if purge:
         purge_unused_images(images)
     return removed
+
+
+# --------------------------------------------------------------------------
+# Unlit: textures with lighting baked in (Painter "Bake Lighting")
+# --------------------------------------------------------------------------
+
+UNLIT_PREFIX = "unlit"
+
+
+def _unlit_nodes(nt) -> list:
+    out = []
+    for n in nt.nodes:
+        try:
+            if str(n.get(TAG, "")).startswith(UNLIT_PREFIX):
+                out.append(n)
+        except Exception:
+            continue
+    return out
+
+
+def _relink_principled(nt):
+    """Put the Principled BSDF back on the Material Output when nothing drives it."""
+    output = find_output(nt)
+    surf = find_socket(output.inputs, ("Surface",)) if output is not None else None
+    if surf is None or surf.is_linked:
+        return
+    bsdf = find_principled(nt, output)
+    if bsdf is not None:
+        link(nt, find_socket(bsdf.outputs, ("BSDF",)), surf)
+
+
+def base_color_node(nt):
+    """Our Base Color image node (with an image), or None."""
+    for n in nt.nodes:
+        if n.bl_idname == "ShaderNodeTexImage" and is_tagged(n) and n.get(TAG) == "image:base_color" \
+                and n.image is not None:
+            return n
+    return None
+
+
+def is_unlit(mat) -> bool:
+    """The Material Output is driven by our emission-only network."""
+    nt = mat.node_tree if mat is not None else None
+    if nt is None:
+        return False
+    output = find_output(nt)
+    surf = find_socket(output.inputs, ("Surface",)) if output is not None else None
+    if surf is None or not surf.is_linked:
+        return False
+    return str(surf.links[0].from_node.get(TAG, "")).startswith(UNLIT_PREFIX)
+
+
+def set_unlit(mat, on: bool) -> bool:
+    """Show ``mat`` unlit: Base Color image -> Emission (strength 1) -> Material Output.
+
+    For textures that already carry their lighting.  Alpha (if the Principled
+    BSDF has it wired) mixes with a Transparent BSDF.  The Principled BSDF and
+    its network stay, unplugged, and come back with ``on=False``.  Returns True
+    when something changed.
+    """
+    nt = mat.node_tree if mat is not None else None
+    if nt is None:
+        return False
+    current = _unlit_nodes(nt)
+    if not on:
+        if not current:
+            return False
+        for n in current:
+            nt.nodes.remove(n)
+        _relink_principled(nt)
+        return True
+    if is_unlit(mat):
+        return False
+    base = base_color_node(nt)
+    output = find_output(nt)
+    surf = find_socket(output.inputs, ("Surface",)) if output is not None else None
+    if base is None or surf is None:
+        return False
+    for n in current:
+        nt.nodes.remove(n)
+
+    def new(idname, role, label, dx, dy):
+        n = nt.nodes.new(idname)
+        n[TAG] = role
+        n.name = f"TP {label}"
+        n.label = label
+        n.select = False
+        n.location = (output.location.x + dx, output.location.y + dy)
+        return n
+
+    em = new("ShaderNodeEmission", "unlit_emission", "Unlit (lighting baked in Painter)", -260, 320)
+    set_input(em, ("Strength",), 1.0)
+    link(nt, find_socket(base.outputs, ("Color",)), find_socket(em.inputs, ("Color",)))
+    shader = find_socket(em.outputs, ("Emission",))
+    bsdf = find_principled(nt, output)
+    alpha = bsdf_input(bsdf, "alpha") if bsdf is not None else None
+    if alpha is not None and alpha.is_linked:
+        tr = new("ShaderNodeBsdfTransparent", "unlit_transparent", "Unlit Transparent", -260, 460)
+        mix = new("ShaderNodeMixShader", "unlit_mix", "Unlit Alpha", -60, 380)
+        link(nt, alpha.links[0].from_socket, mix.inputs[0])
+        link(nt, find_socket(tr.outputs, ("BSDF",)), mix.inputs[1])
+        link(nt, shader, mix.inputs[2])
+        shader = find_socket(mix.outputs, ("Shader",))
+    link(nt, shader, surf)
+    return True
 
 
 def material_has_managed(mat) -> bool:
