@@ -7,6 +7,9 @@ result, never duplicated nodes. Pure Python with no dependencies. It makes no ne
 
 ![A stone floor and two painted metal crates, textured in one go by Texture Plugger](docs/images/render_after.jpg)
 
+**Painting a whole scene in Substance 3D Painter with Blender's lighting?** Follow the
+step-by-step guide: [docs/WORKFLOW.md](docs/WORKFLOW.md).
+
 | Before | After loading two texture folders |
 |---|---|
 | ![The same scene with no materials](docs/images/render_before.jpg) | ![The scene after Texture Plugger built both materials](docs/images/render_after.jpg) |
@@ -42,10 +45,12 @@ are Cycles; the panel screenshot is Blender 5.0's Material Preview.
 
 ## Install
 
-1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-1.3.0.zip`.
+1. Build the zip with `.\build.ps1` (or `python build.py`). This creates `dist\texture_plugger-<version>.zip`.
 2. In Blender go to **Edit > Preferences > Get Extensions**, open the **v** menu (top right),
    choose **Install from Disk...** and pick the zip.
 3. Check that **Texture Plugger** is enabled.
+4. After installing a newer version, **restart Blender**: it keeps running the code it
+   loaded at start-up until then.
 
 The same zip also installs as a legacy add-on (**Add-ons > Install from Disk**).
 
@@ -242,26 +247,45 @@ Painter** sends everything automatically before opening Painter (switch that off
 Surroundings* are in the add-on preferences.
 
 **In Painter:** the plugin loads with Painter (restart Painter once after the first send).
-It adds a **Blender Link** panel and a **Texture Plugger** menu:
+It adds a **Blender Link** panel and a **Texture Plugger** menu. Both are split into three
+coloured sections, so light and textures can't be mixed up:
+
+- **LIGHTING** (yellow, bulb): only light moves; your painted textures are never touched.
+- **TEXTURES** (blue, colour swatch): your painted maps go to Blender or come back.
+- **VIEW** (grey, eye): camera only; nothing in your file changes. It folds away.
+
+Every button carries a badge saying which way it works: orange **B** → red **Pt** is
+*Blender → Painter*, **Pt** → **B** is *Painter → Blender*, a lone **Pt** stays in Painter.
+The menu says the same in words. The *Selected* line under the list names the texture set
+the *Selected* buttons act on and warns when it has no lighting of its own.
+
+Safety: anything that overwrites Blender's files, could hide your paint or deletes a layer
+asks first, with **Cancel** as the default (Enter and Esc never do damage). *Get from
+Blender* warns when the new layer would sit above your own layers, or when Blender's files
+are older than your last Painter save (Painter has the newer work). Only one action runs at
+a time and the buttons grey out while it does, so a double click does nothing twice. The
+coloured status line at the bottom says what the last action did.
 
 - **Solo:** shows only one texture set and frames the camera on it. Painter's own Focus Mode
   is switched on for you. This works with a whole scene loaded. Double-click a set in the panel, or pick it and
   press *Solo*. While soloing, picking another set in Painter's Texture Set List frames
   that one. **Show All** leaves solo mode.
-- **Orbit around it:** the ◀ ▲ ▼ ▶ buttons (and *Zoom +/-*) in the panel orbit around the
+- **Orbit around it:** the ← ↑ ↓ → buttons (and *Zoom +/-*) in the panel orbit around the
   selected object's centre at the current zoom. Alt + left-drag on the object also works;
   Painter then orbits around the point under the cursor.
 - **Lighting:** the Blender lighting becomes the environment map automatically, and
   updates each time you press Send to Painter. Every object you sent keeps its own
   lighting; soloing it switches to that lighting.
-- **Match Blender View:** puts Painter's camera where your Blender view is.
+- **Match Blender Camera:** puts Painter's camera where your Blender view is.
 - **Bake Lighting:** paints the Blender lighting into the Base Color, so you can paint and
   colour-pick lit colours (see below).
 
 ### Bake Lighting: paint with the lighting in the Base Color
 
-Pick a texture set in the *Blender Link* panel and press **Bake Lighting** (the *Texture
-Plugger* menu can also do every linked set at once). The plugin then:
+Pick a texture set in the *Blender Link* panel and press **Bake Lighting into Selected Set**
+(or *Bake Lighting into All Linked Sets…*). If the set has no lighting of its own (it would
+be lit as if it stood where the last object sent is, which can look too blue or too bright),
+or already has a lighting layer of the other kind, the plugin asks first. It then:
 
 1. bakes the *World Space Normal* and *AO* mesh maps first if the set doesn't have them yet
    (the lighting needs them to know which way each pixel faces);
@@ -274,11 +298,16 @@ Paint on *Lit Paint* (or above it), picking colours from the lit result in the B
 channel view. Layers below
 *Blender Lighting* are lit automatically, so you can still change the albedo under it. View
 the **Base Color channel** (press **C**) while painting: Painter's material view lights the
-already-lit colours a second time. The layer follows the lighting: after a new *Send to
-Painter*, or a switch between *Render* and *Material Preview* lighting, it updates on its
-own. *Remove Lighting* deletes the layer and keeps your *Lit Paint* layer.
+already-lit colours a second time. When Blender sends new lighting (or you switch
+between *Render* and *Material Preview*), the layers keep what they show and **Update Baked
+Lighting (N waiting)** lights up: press it to give them the new lighting. It asks first and
+warns when a layer would change kind (Cycles lightmap vs filter), because that layer is made
+again and loses settings you changed on it. Tick *Also update baked lighting layers
+automatically* to have them follow every send (a change of kind still waits for the button).
+*Remove Baked Lighting from Selected…* deletes the layer (after asking) and keeps your *Lit
+Paint* layer.
 
-**Back in Blender:** exports (the panel's *Export to Blender* or Painter's own export
+**Back in Blender:** exports (the panel's *Send … to Blender* or Painter's own export
 dialog) write `texture_plugger_lit.json` next to the textures. Blender then shows those
 sets **unlit**: Base Color → Emission (strength 1) → Material Output, with Alpha through a
 Transparent mix. Blender's lamps don't light them a second time. The Principled BSDF network
@@ -299,9 +328,19 @@ the lighting to UVs first:
 In Blender, select the meshes and press **Bake Lighting to UVs** (*Painter Link* box). For
 each texture set, Cycles bakes the light the object receives onto its own UVs: the Diffuse
 pass, Direct + Indirect, without colour. That includes every lamp, the world, bounce light,
-and cast and contact shadows. The bake is the size of the set's textures, uses *UV Lighting
-Bake Samples* (add-on preferences, 128 by default, not denoised), and includes your scene
-exposure. All objects that use the same texture set are baked together into one map. The
+and cast and contact shadows. It runs in a **background Blender** on a copy of the scene, so
+you can keep working. The status bar shows progress and the time left, and **Esc** stops it.
+Sets finished so far are kept, even if you stop it or close Blender. It bakes on your
+graphics card when the computer has one, even if Cycles is set to *None* in Blender's
+preferences (the CPU is several times slower; your preferences aren't changed).
+
+Settings (add-on preferences): *Lightmap Size* (256 px by default; light needs far less
+detail than paint, and the bake time grows with the pixel count) and *UV Lighting Bake
+Samples* (128, not denoised). It includes your scene exposure. All objects that use the same
+texture set are baked together into one map; material slots no face uses are skipped
+(Painter makes no texture set for them). Mirrored objects (negative scale) bake the right
+way up. To bake every mesh of a .blend from a command prompt, see
+`tools/bake_scene_lighting.py` and the [workflow guide](docs/WORKFLOW.md). The
 operator's *Studio HDRI Too* option (off by default, doubles the time) adds a second bake lit
 by the Material Preview studio HDRI. That bake is Cycles with that HDRI, shadows and bounce
 included, so it isn't the same as EEVEE's Material Preview. Without it, Painter's *Material
@@ -324,8 +363,8 @@ render in the light and within 15% in the shadow, which there gets bounce light 
 filter was 1.9-2.4x too bright in such shadows. The panel lists such sets as *Cycles
 lightmap*. That set's Base Color channel switches to 16-bit float, because light brighter
 than 1 would otherwise be clipped before the Multiply. That doubles the channel's memory;
-exports still write normal PNGs. Baking again in Blender updates the layer on its own. Sets
-without a lightmap keep using the filter.
+exports still write normal PNGs. After baking again in Blender, press *Update Baked
+Lighting*. Sets without a lightmap keep using the filter.
 
 Glossy reflections are view-dependent, so they aren't in either version. The UV bake uses
 the object's active UV map, which must be the one Painter paints on.
@@ -424,8 +463,8 @@ Blender preferences and extensions are never changed.
   (unless they have a fake user or unsaved paint).
 - Create & Paint: Painter must export with the "Blender (Principled BSDF)" template as PNG.
   With any other template the file names don't match and Blender won't pick them up.
-  The **Export to Blender** button in Painter's Blender Link panel (also in the Texture
-  Plugger menu) always does exactly that, into the folder Blender watches. Painter's API
+  The **Send … to Blender** buttons in Painter's Blender Link panel (also in the Texture
+  Plugger menu) always do exactly that, into the folder Blender watches. Painter's API
   can't add a preset to its own Export dialog, so the button is the way to make it stick.
 - Create & Paint: if you change the geometry in Blender after the project was started, the
   mesh is not updated in Painter. Re-import the mesh in Painter (the add-on exports it again
