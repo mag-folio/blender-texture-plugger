@@ -23,6 +23,13 @@ loads with Painter.  It adds a "Blender Link" panel (Window > Views) and a
   Exports mark those sets (texture_plugger_lit.json) and Blender shows them
   unlit, with emission only.
 
+The panel groups its buttons into LIGHTING, TEXTURES and VIEW.  Each button
+carries a painted badge saying what it moves (bulb, texture swatch, eye) and
+which way (Blender -> Painter or Painter -> Blender).  Anything that overwrites
+files, covers paint or deletes a layer asks first (Cancel is the default), only
+one action runs at a time, and baked lighting layers change only when you press
+Update Baked Lighting unless you turn on automatic updates.
+
 Everything comes from ``../../texture_plugger_link/blender_link.json`` (next
 to the ``python`` folder), written by Blender's "Send to Painter" button.
 
@@ -34,7 +41,7 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "1.6.0"
+PLUGIN_VERSION = "1.7.0"
 LINK_FILE = "blender_link.json"
 LINK_DIR_NAME = "texture_plugger_link"
 FRAME_MARGIN = 1.15
@@ -270,6 +277,29 @@ def blender_texture_files(textures_dir, set_name, names=None):
     return out
 
 
+PLACEHOLDER_MAX_PX = 127     # Blender's scaffold writes 64 px stand-ins; Painter exports >= 128
+
+
+def png_size(path):
+    """(width, height) from a PNG header, or None."""
+    import struct
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(24)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        return None
+    return struct.unpack(">II", head[16:24])
+
+
+def is_placeholder_png(path):
+    """True for the tiny blank textures Blender makes before anything was painted
+    (loading them would put flat colours over the paint)."""
+    size = png_size(path)
+    return bool(size) and max(size) <= PLACEHOLDER_MAX_PX
+
+
 def channels_for_files(files, channel_enum, stack_channels):
     """{Painter channel type: file} for the channels this stack actually has.
 
@@ -501,6 +531,68 @@ def lit_updates(recorded, wanted):
                   if wanted.get(n) and wanted.get(n) != env)
 
 
+def lit_kind_swaps(recorded, wanted):
+    """Lit sets whose update would change the KIND of lighting layer (Cycles
+    lightmap <-> environment filter).  Such an update deletes the layer and makes
+    a new one, so settings tweaked on it in Painter (filter sliders, opacity,
+    masks) are lost: never done without asking."""
+    return sorted(n for n in lit_updates(recorded, wanted)
+                  if is_lightmap(recorded.get(n)) != is_lightmap(wanted.get(n)))
+
+
+# Layers the plugin makes itself; every other layer is the user's work.
+def user_layers(layer_names):
+    """The user's own layers among a texture set's root layer names."""
+    ours = {LIGHT_LAYER_NAME, LIT_PAINT_LAYER_NAME, FROM_BLENDER_LAYER_NAME}
+    return [n for n in (layer_names or ()) if n not in ours]
+
+
+def load_would_cover(layer_names):
+    """True when Load from Blender would put a new opaque "From Blender" layer
+    above the user's own layers (hiding their paint): the set has user layers and
+    no "From Blender" layer yet (an existing one is only updated in place)."""
+    names = list(layer_names or ())
+    return bool(user_layers(names)) and FROM_BLENDER_LAYER_NAME not in names
+
+
+def older_than(file_times, reference_time, slack=2.0):
+    """Names whose time is older than ``reference_time`` (minus ``slack`` seconds)."""
+    if not reference_time:
+        return []
+    return sorted(n for n, t in (file_times or {}).items()
+                  if t and t < float(reference_time) - slack)
+
+
+def short_list(names, n=4):
+    """'a, b, c and 3 more'."""
+    names = list(names or ())
+    head = ", ".join(names[:n])
+    return head + (f" and {len(names) - n} more" if len(names) > n else "")
+
+
+# What each panel button does and which way data goes, for the badges drawn on it.
+# direction: "b2p" Blender -> Painter, "p2b" Painter -> Blender, "painter" stays
+# in Painter.  kind: "light", "texture" or "view".
+ACTIONS = {
+    "show_light":   ("b2p", "light"),
+    "bake_light":   ("b2p", "light"),
+    "bake_all":     ("b2p", "light"),
+    "update_light": ("b2p", "light"),
+    "remove_light": ("painter", "light"),
+    "send_sel":     ("p2b", "texture"),
+    "send_all":     ("p2b", "texture"),
+    "get_sel":      ("b2p", "texture"),
+    "get_all":      ("b2p", "texture"),
+    "match_view":   ("b2p", "view"),
+    "solo":         ("painter", "view"),
+    "frame":        ("painter", "view"),
+    "show_all":     ("painter", "view"),
+}
+QUEUE_OK = {"bake_light", "bake_all"}      # may be pressed while mesh maps bake: they queue
+DIRECTION_WORDS = {"b2p": "Blender → Painter", "p2b": "Painter → Blender",
+                   "painter": "Painter only"}
+
+
 # ==========================================================================
 # Painter side
 # ==========================================================================
@@ -522,6 +614,9 @@ class Bridge:
         self.last_set_names = ()
         self.auto_light = True
         self.light_mode = self._load_mode()
+        # Off by default: baked lighting layers change only when you press Update
+        # Baked Lighting, never behind your back when Blender sends something.
+        self.auto_relight = self._load_flag("auto_relight", False)
         self.follow = True
         self.widget = None
         self.menu = None
@@ -549,7 +644,7 @@ class Bridge:
         import substance_painter.logging as lg
         (lg.warning if warn else lg.info)("Texture Plugger: " + msg)
         if self.widget is not None:
-            self.widget.set_status(msg)
+            self.widget.set_status(msg, warn)
 
     @staticmethod
     def project_ready():
@@ -675,7 +770,8 @@ class Bridge:
                 else:                                        # e.g. a view-only send: stay on
                     self.apply_lighting()                    # the set being worked on
             if self.reload_lightmaps() or changed:
-                self.refresh_lit_layers()                    # new Blender lighting: relight
+                self.refresh_lit_layers(auto=True)           # new Blender lighting
+                self.refresh_ui()                            # "N waiting" on the button
             names = tuple(self.texture_set_names())
             if names != self.last_set_names:      # mesh reimported / sets added
                 self.last_set_names = names
@@ -712,6 +808,28 @@ class Bridge:
         from PySide6 import QtCore
         return QtCore.QSettings("TexturePlugger", "BlenderLink")
 
+    def _load_flag(self, key, default):
+        try:
+            v = self._settings().value(key, default)
+        except Exception:
+            return default
+        if isinstance(v, str):
+            return v.lower() in ("1", "true", "yes")
+        return bool(v)
+
+    def _save_flag(self, key, value):
+        try:
+            self._settings().setValue(key, bool(value))
+        except Exception:
+            pass
+
+    def set_auto_relight(self, on):
+        self.auto_relight = bool(on)
+        self._save_flag("auto_relight", on)
+        if on:
+            self.refresh_lit_layers(auto=True)
+        self.refresh_ui()
+
     def _load_mode(self):
         try:
             mode = str(self._settings().value("light_mode", "render"))
@@ -736,7 +854,7 @@ class Bridge:
             self.log("Blender sent no Material Preview lighting: press Send to Painter "
                      "in Blender (the add-on sends it with the render lighting)", warn=True)
         self.apply_lighting(force=True)
-        self.refresh_lit_layers()          # baked layers follow the lighting shown
+        self.refresh_lit_layers(auto=True)  # baked layers follow, if you allowed that
         self.refresh_ui()
         return True
 
@@ -1219,11 +1337,79 @@ class Bridge:
         self.refresh_ui()
         return bool(removed)
 
+    def layer_names(self, set_name):
+        """Names of a texture set's root layers (top first), or [] if unreadable."""
+        import substance_painter.layerstack as ls
+        try:
+            return [n.get_name() for n in ls.get_root_layer_nodes(self._stack(set_name))]
+        except Exception:
+            return []
+
+    def light_layer_kind(self, set_name):
+        """"lightmap", "filter" or None: what the set's Blender Lighting layer is."""
+        rec = self._lit_record().get(set_name)
+        if self.light_layer(set_name) is None:
+            return None
+        return "lightmap" if is_lightmap(rec) else "filter"
+
+    def project_saved_time(self):
+        """Modification time of the open project's .spp (0 if never saved)."""
+        import substance_painter.project as pj
+        try:
+            path = pj.file_path() or ""
+            return os.path.getmtime(path) if path else 0.0
+        except Exception:
+            return 0.0
+
+    def blender_base_color_times(self, set_names):
+        """Set -> time of the Base Color PNG Blender shows (sets without one left out)."""
+        folder = self.export_dir()
+        try:
+            listing = os.listdir(folder) if folder else []
+        except OSError:
+            listing = []
+        out = {}
+        for name in set_names:
+            f = blender_texture_files(folder, name, listing).get("BaseColor")
+            if f and not is_placeholder_png(f):
+                try:
+                    out[name] = os.path.getmtime(f)
+                except OSError:
+                    pass
+        return out
+
     def lit_set_names(self):
         return [n for n in self.texture_set_names() if self.light_layer(n) is not None]
 
-    def refresh_lit_layers(self):
-        """Give lit sets the lighting Blender sent last (and the mode shown)."""
+    def borrows_lighting(self, set_name):
+        """True when a set has no lighting of its own (no environment sent for it,
+        no Cycles lightmap) and would be lit with the last object sent: wrong place,
+        often too blue or too bright.  Such layers are never relit automatically."""
+        if self.light_mode != "render" or self.lightmap_for(set_name):
+            return False
+        return not (self.set_info(set_name) or {}).get("environment")
+
+    def pending_relight(self):
+        """(sets whose baked lighting layer shows older lighting than Blender sent,
+        those of them whose layer would change kind).  Cheap: no layer access."""
+        if not self.project_ready() or (not self.data and not self.lightmaps):
+            return [], []
+        rec = self._lit_record()
+        if not rec:
+            return [], []
+        wanted = {n: self.lighting_for(n) for n in rec}
+        return ([n for n in lit_updates(rec, wanted) if not self.borrows_lighting(n)],
+                [n for n in lit_kind_swaps(rec, wanted) if not self.borrows_lighting(n)])
+
+    def refresh_lit_layers(self, names=None, auto=False, allow_swaps=False):
+        """Give lit sets the lighting Blender sent last (and the mode shown).
+
+        ``auto``: called because Blender sent something; does nothing unless
+        "update automatically" is on.  A layer that would change kind (lightmap <->
+        filter, which deletes it with its settings) is only replaced with
+        ``allow_swaps`` (an explicit, confirmed press)."""
+        if auto and not self.auto_relight:
+            return
         if not self.project_ready() or self._baking is not None:
             return
         if not self.data and not self.lightmaps:
@@ -1232,8 +1418,15 @@ class Bridge:
         if not rec:
             return
         wanted = {n: self.lighting_for(n) for n in rec}
+        swaps = set(lit_kind_swaps(rec, wanted))
         changed = []
         for name in lit_updates(rec, wanted):
+            if names is not None and name not in names:
+                continue
+            if name in swaps and not allow_swaps:
+                continue
+            if self.borrows_lighting(name):
+                continue        # would take another object's lighting: Bake Lighting asks
             if self.light_layer(name) is None:
                 rec.pop(name, None)            # layer deleted by hand
                 continue
@@ -1410,7 +1603,7 @@ class Bridge:
         lit_sets = {k for k, v in (marker.get("sets") or {}).items()
                     if isinstance(v, dict) and v.get("lit")}
         names = [n for n in (set_names or self.texture_set_names()) if n]
-        done, missing, lit_warn, failed = [], [], [], []
+        done, missing, lit_warn, failed, blank = [], [], [], [], []
         for name in names:
             try:
                 stack_channels = list(self._stack(name).all_channels())
@@ -1419,6 +1612,11 @@ class Bridge:
                 continue
             files = channels_for_files(blender_texture_files(folder, name, listing),
                                        ts.ChannelType, stack_channels)
+            real = {ch: f for ch, f in files.items() if not is_placeholder_png(f)}
+            if files and not real:
+                blank.append(name)                # nothing painted/exported yet
+                continue
+            files = real
             if not files:
                 missing.append(name)
                 continue
@@ -1443,13 +1641,16 @@ class Bridge:
         if missing:
             msg += f"; no exported textures for {', '.join(missing[:3])}" + (
                 f" and {len(missing) - 3} more" if len(missing) > 3 else "")
+        if blank:
+            msg += (f"; skipped {short_list(blank, 3)}: Blender only has blank placeholder "
+                    "textures for them (nothing exported from Painter yet)")
         if lit_warn:
             msg += (f". {', '.join(lit_warn[:3])}: Blender's Base Color has lighting baked in "
                     "but this project has no Blender Lighting layer; press Bake Lighting so "
                     "the next export is marked lit again")
         if failed:
             msg += ". Failed: " + "; ".join(failed[:3])
-        self.log(msg, warn=bool(missing or lit_warn or failed or not done))
+        self.log(msg, warn=bool(missing or lit_warn or failed or blank or not done))
         self.refresh_ui()
         return bool(done)
 
@@ -1697,149 +1898,634 @@ class Bridge:
                 pass
 
 
+# ---- Panel art: small badges painted in code (no image files to install) ----
+
+BLENDER_ORANGE = "#F5792A"
+PAINTER_RED = "#E8475F"
+KIND_COLORS = {"light": "#F2C94C", "texture": "#4FB3E8", "view": "#9AA5B1"}
+ICON_W, ICON_H = 78, 26
+
+
+def rgba(hex_color, alpha):
+    """'rgba(r,g,b,a)' for style sheets (Qt reads 8-digit hex as #AARRGGBB, not
+    #RRGGBBAA, so alpha is never appended to a hex colour)."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{int(alpha)})"
+
+
+def _paint_glyph(p, kind, x, y, s):
+    """A little picture of WHAT a button moves: a light bulb, a texture swatch or an eye."""
+    from PySide6 import QtCore, QtGui
+    p.save()
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    if kind == "light":
+        p.setPen(QtGui.QPen(QtGui.QColor("#FFE9A0"), 1.4))
+        cx, cy = x + s * 0.5, y + s * 0.38
+        for a in range(0, 360, 45):                     # rays
+            if 100 < a < 260:
+                continue
+            r = math.radians(a)
+            p.drawLine(QtCore.QPointF(cx + math.cos(r) * s * 0.36, cy - math.sin(r) * s * 0.36),
+                       QtCore.QPointF(cx + math.cos(r) * s * 0.48, cy - math.sin(r) * s * 0.48))
+        p.setPen(QtGui.QPen(QtGui.QColor("#B8901C"), 1.2))
+        p.setBrush(QtGui.QColor("#FFD54A"))
+        p.drawEllipse(QtCore.QPointF(cx, cy), s * 0.27, s * 0.27)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor("#A7AFB8"))
+        p.drawRoundedRect(QtCore.QRectF(cx - s * 0.13, cy + s * 0.25, s * 0.26, s * 0.2), 1.5, 1.5)
+    elif kind == "texture":
+        cols = ("#4FC3F7", "#F06292", "#AED581", "#FFB74D")
+        t = s * 0.38
+        ox, oy = x + s * 0.12, y + s * 0.12
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(ox, oy, 2 * t, 2 * t), 3, 3)
+        p.setClipPath(path)
+        p.setPen(QtCore.Qt.NoPen)
+        for i, c in enumerate(cols):
+            p.setBrush(QtGui.QColor(c))
+            p.drawRect(QtCore.QRectF(ox + (i % 2) * t, oy + (i // 2) * t, t, t))
+        p.setClipping(False)
+        p.setPen(QtGui.QPen(QtGui.QColor("#FFFFFF"), 1.6))   # a brush stroke across it
+        p.drawLine(QtCore.QPointF(ox + 2 * t - 1, oy + 1), QtCore.QPointF(ox + t * 0.9, oy + t * 1.1))
+    elif kind == "view":
+        p.setPen(QtGui.QPen(QtGui.QColor("#CFD8DC"), 1.5))
+        p.setBrush(QtCore.Qt.NoBrush)
+        path = QtGui.QPainterPath()
+        path.moveTo(x + s * 0.08, y + s * 0.5)
+        path.quadTo(x + s * 0.5, y + s * 0.1, x + s * 0.92, y + s * 0.5)
+        path.quadTo(x + s * 0.5, y + s * 0.9, x + s * 0.08, y + s * 0.5)
+        p.drawPath(path)
+        p.setBrush(QtGui.QColor("#4FB3E8"))
+        p.drawEllipse(QtCore.QPointF(x + s * 0.5, y + s * 0.5), s * 0.15, s * 0.15)
+    p.restore()
+
+
+def _paint_app(p, app, x, y, h):
+    """A round orange "B" (Blender) or a red "Pt" tile (Painter).  Returns its width."""
+    from PySide6 import QtCore, QtGui
+    p.save()
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    f = QtGui.QFont()
+    f.setBold(True)
+    f.setPixelSize(int(h * 0.55))
+    p.setFont(f)
+    p.setPen(QtCore.Qt.NoPen)
+    if app == "blender":
+        w = h
+        p.setBrush(QtGui.QColor(BLENDER_ORANGE))
+        p.drawEllipse(QtCore.QRectF(x, y, w, h))
+        text = "B"
+    else:
+        w = h * 1.15
+        p.setBrush(QtGui.QColor(PAINTER_RED))
+        p.drawRoundedRect(QtCore.QRectF(x, y, w, h), 4, 4)
+        text = "Pt"
+    p.setPen(QtGui.QColor("white"))
+    p.drawText(QtCore.QRectF(x, y, w, h), QtCore.Qt.AlignCenter, text)
+    p.restore()
+    return w
+
+
+def _paint_arrow(p, x0, x1, y):
+    from PySide6 import QtCore, QtGui
+    p.save()
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    p.setPen(QtGui.QPen(QtGui.QColor("#E8EAED"), 2.0, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
+    p.drawLine(QtCore.QPointF(x0, y), QtCore.QPointF(x1 - 3, y))
+    p.setPen(QtCore.Qt.NoPen)
+    p.setBrush(QtGui.QColor("#E8EAED"))
+    p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(x1, y), QtCore.QPointF(x1 - 5, y - 4),
+                                   QtCore.QPointF(x1 - 5, y + 4)]))
+    p.restore()
+
+
+def badge_pixmap(direction, kind=None, w=ICON_W, h=ICON_H, scale=2.0):
+    """[what] [from] -> [to]: e.g. a bulb, then Blender -> Painter."""
+    from PySide6 import QtCore, QtGui
+    pm = QtGui.QPixmap(int(w * scale), int(h * scale))
+    pm.setDevicePixelRatio(scale)
+    pm.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(pm)
+    x = 0.0
+    if kind:
+        _paint_glyph(p, kind, 0, 1, h - 2)
+        x = h + 1
+    bh = h - 8
+    by = 4
+    if direction == "b2p":
+        x += _paint_app(p, "blender", x, by, bh) + 2
+        _paint_arrow(p, x, x + 11, h / 2)
+        _paint_app(p, "painter", x + 13, by, bh)
+    elif direction == "p2b":
+        x += _paint_app(p, "painter", x, by, bh) + 2
+        _paint_arrow(p, x, x + 11, h / 2)
+        _paint_app(p, "blender", x + 13, by, bh)
+    else:
+        _paint_app(p, "painter", x, by, bh)
+    p.end()
+    return pm
+
+
 def _make_panel(bridge):
-    from PySide6 import QtCore, QtWidgets
+    from PySide6 import QtCore, QtGui, QtWidgets
 
     class Panel(QtWidgets.QWidget):
         def __init__(self):
             super().__init__()
             self.setObjectName("TexturePluggerBlenderLink")
             self.setWindowTitle("Blender Link")
-            lay = QtWidgets.QVBoxLayout(self)
+            self.buttons = {}            # action id -> button
+            self.needs_selection = set() # action ids that act on the selected set
+            self._busy = False
+            self._dont_ask = set()       # confirmations turned off until restart
+            self._icons = {}
+
+            outer = QtWidgets.QVBoxLayout(self)
+            outer.setContentsMargins(4, 4, 4, 4)
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            inner = QtWidgets.QWidget()
+            lay = QtWidgets.QVBoxLayout(inner)
+            lay.setContentsMargins(2, 2, 2, 2)
+            lay.setSpacing(8)
+            scroll.setWidget(inner)
+            outer.addWidget(scroll, 1)
+
+            # ---- link state and the legend of the badges
             self.info = QtWidgets.QLabel()
             self.info.setWordWrap(True)
             lay.addWidget(self.info)
+            legend = QtWidgets.QHBoxLayout()
+            for direction in ("b2p", "p2b"):
+                pic = QtWidgets.QLabel()
+                pic.setPixmap(badge_pixmap(direction, None, 50, 22))
+                legend.addWidget(pic)
+                t = QtWidgets.QLabel(DIRECTION_WORDS[direction])
+                t.setStyleSheet("color: #BFC5CC;")
+                legend.addWidget(t)
+                legend.addSpacing(10)
+            legend.addStretch(1)
+            lay.addLayout(legend)
 
+            # ---- texture sets
             self.list = QtWidgets.QListWidget()
-            self.list.setToolTip("Double-click to solo a texture set and frame it")
+            self.list.setMinimumHeight(110)
+            self.list.setMaximumHeight(240)
+            self.list.setToolTip("Pick the texture set the 'Selected' buttons work on. "
+                                 "Double-click to solo it and frame it")
             self.list.itemDoubleClicked.connect(lambda it: bridge.solo(it.data(QtCore.Qt.UserRole)))
-            lay.addWidget(self.list, 1)
+            self.list.currentItemChanged.connect(lambda *_: self.update_actions())
+            lay.addWidget(self.list)
+            self.target = QtWidgets.QLabel()
+            self.target.setWordWrap(True)
+            self.target.setTextFormat(QtCore.Qt.RichText)
+            self.target.setStyleSheet("padding: 4px 6px; border-radius: 4px; "
+                                      "background: rgba(255,255,255,0.06);")
+            lay.addWidget(self.target)
 
+            # ---- LIGHTING
+            box = self._section(lay, "light", "LIGHTING",
+                                "How Blender's light looks on your paint. Only light moves "
+                                "here: your painted textures are never touched.")
+            self._button(box, "show_light", "Show Blender Lighting in Viewport",
+                         "Painter's viewport environment becomes the lighting Blender sent "
+                         "(nothing in your layers changes)",
+                         lambda: bridge.apply_lighting(self.selected(), force=True))
             row = QtWidgets.QHBoxLayout()
-            b = QtWidgets.QPushButton("Solo")
-            b.setToolTip("Show only the selected texture set and frame it")
-            b.clicked.connect(lambda: bridge.solo(self.selected()))
-            row.addWidget(b)
-            b = QtWidgets.QPushButton("Frame")
-            b.setToolTip("Frame the selected texture set without hiding the others")
-            b.clicked.connect(lambda: bridge.frame_set(self.selected()))
-            row.addWidget(b)
-            b = QtWidgets.QPushButton("Show All")
-            b.setToolTip("Leave solo and frame the whole scene")
-            b.clicked.connect(lambda: bridge.unsolo())
-            row.addWidget(b)
-            lay.addLayout(row)
+            row.addWidget(QtWidgets.QLabel("Light from Blender's:"))
+            self.mode_render = QtWidgets.QRadioButton("Render")
+            self.mode_render.setToolTip("Blender's scene lighting (world + lamps) baked around "
+                                        "the object, like Blender's Rendered view")
+            self.mode_preview = QtWidgets.QRadioButton("Material Preview")
+            self.mode_preview.setToolTip("The studio HDRI of Blender's Material Preview, with "
+                                         "its rotation and strength (often bluer or greener "
+                                         "than your scene)")
+            group = QtWidgets.QButtonGroup(self)
+            group.addButton(self.mode_render)
+            group.addButton(self.mode_preview)
+            self.mode_render.toggled.connect(lambda v: v and self.do_mode("render"))
+            self.mode_preview.toggled.connect(lambda v: v and self.do_mode("preview"))
+            row.addWidget(self.mode_render)
+            row.addWidget(self.mode_preview)
+            row.addStretch(1)
+            box.addLayout(row)
+            self._button(box, "bake_light", "Bake Lighting into Selected Set",
+                         "Adds a 'Blender Lighting' layer to the selected set's Base Color "
+                         "and an empty 'Lit Paint' layer above it to paint lit colours on. "
+                         "Bakes missing World Space Normal / AO mesh maps first. Exports then "
+                         "show it unlit in Blender",
+                         lambda: self.do_bake(False), selection=True)
+            self._button(box, "bake_all", "Bake Lighting into All Linked Sets…",
+                         "Same for every texture set Blender linked (asks first)",
+                         lambda: self.do_bake(True))
+            self._button(box, "update_light", "Update Baked Lighting",
+                         "Blender sent new lighting: give the baked lighting layers that "
+                         "lighting. Asks first, and says which layers would lose settings",
+                         self.do_update)
+            self._button(box, "remove_light", "Remove Baked Lighting from Selected…",
+                         "Deletes the selected set's 'Blender Lighting' layer (your Lit Paint "
+                         "layer and its paint stay). Asks first",
+                         self.do_remove, selection=True, danger=True)
+            self.auto = QtWidgets.QCheckBox("Show new Blender lighting in the viewport automatically")
+            self.auto.setChecked(bridge.auto_light)
+            self.auto.toggled.connect(self._auto)
+            box.addWidget(self.auto)
+            self.auto_relight = QtWidgets.QCheckBox("Also update baked lighting layers automatically")
+            self.auto_relight.setToolTip(
+                "Off (safer): your 'Blender Lighting' layers keep their lighting until you press "
+                "Update Baked Lighting. On: they follow every Send to Painter from Blender "
+                "(a layer that would change kind is still never replaced without asking)")
+            self.auto_relight.setChecked(bridge.auto_relight)
+            self.auto_relight.toggled.connect(bridge.set_auto_relight)
+            box.addWidget(self.auto_relight)
 
+            # ---- TEXTURES
+            box = self._section(lay, "texture", "TEXTURES",
+                                "Your painted maps (Base Color, Roughness, Metallic...). "
+                                "Lighting is not moved here.")
+            self._button(box, "send_sel", "Send Selected Set to Blender…",
+                         "Exports the selected set's textures (Blender template, PNG) into "
+                         "the folder Blender watches; Blender reloads them. Saves the "
+                         "project first", lambda: self.do_send(False), selection=True)
+            self._button(box, "send_all", "Send All Sets to Blender…",
+                         "Same for every texture set", lambda: self.do_send(True))
+            self._button(box, "get_sel", "Get Selected Set from Blender…",
+                         "Brings the textures Blender shows back in as a 'From Blender' fill "
+                         "layer. Warns first if it would cover your paint or if Painter's work "
+                         "is newer", lambda: self.do_get(False), selection=True)
+            self._button(box, "get_all", "Get All Sets from Blender…",
+                         "Same for every texture set", lambda: self.do_get(True))
+
+            # ---- VIEW (folds away)
+            box = self._section(lay, "view", "VIEW", "Camera only: nothing in your file "
+                                "changes.", foldable=True)
+            self._button(box, "match_view", "Match Blender Camera",
+                         "Puts Painter's camera where your Blender viewport is",
+                         bridge.match_view)
             row = QtWidgets.QHBoxLayout()
-            b = QtWidgets.QPushButton("Match Blender View")
-            b.clicked.connect(bridge.match_view)
-            row.addWidget(b)
-            b = QtWidgets.QPushButton("Apply Lighting")
-            b.setToolTip("Use the lighting baked in Blender as the environment map")
-            b.clicked.connect(lambda: bridge.apply_lighting(self.selected(), force=True))
-            row.addWidget(b)
-            lay.addLayout(row)
-
+            self._button(row, "solo", "Solo", "Show only the selected texture set and frame it",
+                         lambda: bridge.solo(self.selected()), selection=True, small=True)
+            self._button(row, "frame", "Frame", "Frame the selected texture set without hiding "
+                         "the others", lambda: bridge.frame_set(self.selected()),
+                         selection=True, small=True)
+            self._button(row, "show_all", "Show All", "Leave solo and frame the whole scene",
+                         lambda: bridge.unsolo(), small=True)
+            box.addLayout(row)
             grid = QtWidgets.QGridLayout()
             for text, tip, col, args in (
-                    ("◀", "Orbit left around the object", 0, dict(yaw=-15.0)),
-                    ("▲", "Orbit up around the object", 1, dict(pitch=10.0)),
-                    ("▼", "Orbit down around the object", 2, dict(pitch=-10.0)),
-                    ("▶", "Orbit right around the object", 3, dict(yaw=15.0)),
+                    ("←", "Orbit left around the object", 0, dict(yaw=-15.0)),
+                    ("↑", "Orbit up around the object", 1, dict(pitch=10.0)),
+                    ("↓", "Orbit down around the object", 2, dict(pitch=-10.0)),
+                    ("→", "Orbit right around the object", 3, dict(yaw=15.0)),
                     ("Zoom +", "Move closer to the object", 4, dict(zoom=0.8)),
                     ("Zoom -", "Move away from the object", 5, dict(zoom=1.25))):
                 b = QtWidgets.QPushButton(text)
                 b.setToolTip(tip)
+                b.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
                 b.clicked.connect(lambda _=False, a=args: bridge.orbit(set_name=self.selected(), **a))
                 grid.addWidget(b, 0, col)
-            lay.addLayout(grid)
-
-            row = QtWidgets.QHBoxLayout()
-            b = QtWidgets.QPushButton("Export to Blender")
-            b.setToolTip("Export every texture set with the settings Blender's Texture Plugger "
-                         "expects (Blender (Principled BSDF) template, PNG) into the folder "
-                         "Blender watches. Blender reloads them")
-            b.clicked.connect(lambda: bridge.export_to_blender())
-            row.addWidget(b)
-            b = QtWidgets.QPushButton("Export Selected")
-            b.setToolTip("Same, for the selected texture set only (faster on big scenes)")
-            b.clicked.connect(lambda: bridge.export_to_blender(self.selected()))
-            row.addWidget(b)
-            lay.addLayout(row)
-
-            row = QtWidgets.QHBoxLayout()
-            b = QtWidgets.QPushButton("Load from Blender")
-            b.setToolTip("Bring the textures Blender shows back into Painter: a 'From Blender' "
-                         "fill layer per texture set (Base Color, Roughness, Metallic, Emission, "
-                         "Alpha) from the folder Blender watches. Normal and height are left "
-                         "out (the exported normal already holds the baked mesh detail)")
-            b.clicked.connect(lambda: bridge.load_from_blender())
-            row.addWidget(b)
-            b = QtWidgets.QPushButton("Load Selected")
-            b.setToolTip("Same, for the selected texture set only")
-            b.clicked.connect(lambda: bridge.load_from_blender([self.selected()]))
-            row.addWidget(b)
-            lay.addLayout(row)
-
-            row = QtWidgets.QHBoxLayout()
-            b = QtWidgets.QPushButton("Bake Lighting")
-            b.setToolTip("Light the selected texture set's Base Color with its Blender lighting "
-                         "(Painter's Baked Lighting Environment filter, in a 'Blender Lighting' "
-                         "layer), and add a 'Lit Paint' layer above it to paint lit colours on. "
-                         "Bakes the World Space Normal and AO mesh maps first if they are "
-                         "missing. Exports then show it unlit in Blender")
-            b.clicked.connect(lambda: bridge.bake_lighting([self.selected()]))
-            row.addWidget(b)
-            b = QtWidgets.QPushButton("Remove Lighting")
-            b.setToolTip("Delete the selected set's 'Blender Lighting' layer (your Lit Paint "
-                         "layer stays). Export again so Blender shows it lit normally")
-            b.clicked.connect(lambda: bridge.remove_lighting([self.selected()]))
-            row.addWidget(b)
-            lay.addLayout(row)
-
-            row = QtWidgets.QHBoxLayout()
-            row.addWidget(QtWidgets.QLabel("Lighting:"))
-            self.mode_render = QtWidgets.QRadioButton("Render")
-            self.mode_render.setToolTip("Blender's scene lighting (world + lamps) baked around the "
-                                        "object, like Blender's Rendered view")
-            self.mode_preview = QtWidgets.QRadioButton("Material Preview")
-            self.mode_preview.setToolTip("The studio HDRI of Blender's Material Preview, with its "
-                                         "rotation and strength")
-            group = QtWidgets.QButtonGroup(self)
-            group.addButton(self.mode_render)
-            group.addButton(self.mode_preview)
-            self.mode_render.toggled.connect(lambda v: v and bridge.set_light_mode("render"))
-            self.mode_preview.toggled.connect(lambda v: v and bridge.set_light_mode("preview"))
-            row.addWidget(self.mode_render)
-            row.addWidget(self.mode_preview)
-            row.addStretch(1)
-            lay.addLayout(row)
-
-            self.auto = QtWidgets.QCheckBox("Use Blender lighting automatically")
-            self.auto.setChecked(bridge.auto_light)
-            self.auto.toggled.connect(self._auto)
-            lay.addWidget(self.auto)
+            box.addLayout(grid)
             self.follow = QtWidgets.QCheckBox("While soloing, frame the texture set I pick")
             self.follow.setChecked(bridge.follow)
             self.follow.toggled.connect(lambda v: setattr(bridge, "follow", v))
-            lay.addWidget(self.follow)
-            hint = QtWidgets.QLabel("Arrow buttons orbit around the selected object's centre at the "
-                                    "current zoom. Alt + left-drag orbits around the point under "
-                                    "the cursor instead. With baked lighting, view the Base Color "
-                                    "channel (C) to paint: the material view lights it twice.")
+            box.addWidget(self.follow)
+            hint = QtWidgets.QLabel("Arrows orbit around the selected object's centre. "
+                                    "Alt + left-drag orbits around the point under the cursor.")
             hint.setWordWrap(True)
             hint.setEnabled(False)
-            lay.addWidget(hint)
+            box.addWidget(hint)
+            lay.addStretch(0)
+
+            # ---- status: always visible, outside the scroll area
             self.status = QtWidgets.QLabel()
             self.status.setWordWrap(True)
-            lay.addWidget(self.status)
+            self.status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            outer.addWidget(self.status)
+            self.set_status("")
             self.refresh()
+
+        # ------------------------------------------------------------ building
+        def _section(self, parent, kind, title, subtitle, foldable=False):
+            color = KIND_COLORS[kind]
+            frame = QtWidgets.QFrame()
+            frame.setObjectName(f"tpSection_{kind}")
+            frame.setStyleSheet(
+                f"QFrame#tpSection_{kind} {{ border: 1px solid {rgba(color, 90)}; border-left: "
+                f"4px solid {color}; border-radius: 5px; background: {rgba(color, 22)}; }}")
+            v = QtWidgets.QVBoxLayout(frame)
+            v.setContentsMargins(8, 6, 8, 8)
+            v.setSpacing(5)
+            head = QtWidgets.QHBoxLayout()
+            pic = QtWidgets.QLabel()
+            pm = QtGui.QPixmap(48, 48)
+            pm.setDevicePixelRatio(2.0)
+            pm.fill(QtCore.Qt.transparent)
+            p = QtGui.QPainter(pm)
+            _paint_glyph(p, kind, 0, 0, 24)
+            p.end()
+            pic.setPixmap(pm)
+            head.addWidget(pic)
+            t = QtWidgets.QLabel(title)
+            f = t.font()
+            f.setBold(True)
+            f.setPointSizeF(f.pointSizeF() * 1.15)
+            t.setFont(f)
+            t.setStyleSheet(f"color: {color}; border: none; background: transparent;")
+            head.addWidget(t)
+            head.addStretch(1)
+            body = QtWidgets.QWidget()
+            body.setObjectName("tpBody")
+            body.setStyleSheet("QWidget#tpBody { background: transparent; }")
+            bv = QtWidgets.QVBoxLayout(body)
+            bv.setContentsMargins(0, 0, 0, 0)
+            bv.setSpacing(5)
+            if foldable:
+                tb = QtWidgets.QToolButton()
+                tb.setCheckable(True)
+                tb.setChecked(True)
+                tb.setArrowType(QtCore.Qt.DownArrow)
+                tb.setAutoRaise(True)
+                tb.setToolTip("Fold / unfold")
+
+                def fold(on, tb=tb, body=body):
+                    body.setVisible(on)
+                    tb.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
+                tb.toggled.connect(fold)
+                head.addWidget(tb)
+            v.addLayout(head)
+            sub = QtWidgets.QLabel(subtitle)
+            sub.setWordWrap(True)
+            sub.setStyleSheet("color: #AEB4BB; border: none; background: transparent;")
+            bv.addWidget(sub)
+            v.addWidget(body)
+            parent.addWidget(frame)
+            return bv
+
+        def _section_icon(self, kind):
+            pm = QtGui.QPixmap(48, 48)
+            pm.setDevicePixelRatio(2.0)
+            pm.fill(QtCore.Qt.transparent)
+            p = QtGui.QPainter(pm)
+            _paint_glyph(p, kind, 0, 0, 24)
+            p.end()
+            return QtGui.QIcon(pm)
+
+        def _icon(self, action):
+            if action not in self._icons:
+                direction, kind = ACTIONS[action]
+                self._icons[action] = QtGui.QIcon(badge_pixmap(direction, kind))
+            return self._icons[action]
+
+        def _button(self, parent, action, text, tip, fn, selection=False, danger=False,
+                    small=False):
+            direction, kind = ACTIONS[action]
+            b = QtWidgets.QPushButton(text)
+            if not small:
+                b.setIcon(self._icon(action))
+                b.setIconSize(QtCore.QSize(ICON_W, ICON_H))
+                b.setMinimumHeight(ICON_H + 8)
+            b.setToolTip(f"<b>{DIRECTION_WORDS[direction]}</b><br>{tip}")
+            style = "QPushButton { text-align: left; padding: 3px 8px; }"
+            if danger:
+                style += (" QPushButton { color: #FF8A80; border: 1px solid "
+                          f"{rgba('#FF8A80', 110)}; border-radius: 3px; }} "
+                          "QPushButton:disabled { color: #777; }")
+            b.setStyleSheet(style)
+            b.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+            queue_ok = action in QUEUE_OK
+            b.clicked.connect(lambda _=False: self.run(fn, queue_ok))
+            parent.addWidget(b)
+            self.buttons[action] = b
+            if selection:
+                self.needs_selection.add(action)
+            return b
+
+        # ----------------------------------------------------------- safety net
+        def run(self, fn, queue_ok=False):
+            """One action at a time; buttons are greyed out while it runs, so a
+            double click or an impatient second press is ignored.  ``queue_ok``:
+            Bake Lighting queues behind a mesh-map bake that is still running."""
+            if self._busy:
+                return
+            if bridge._baking is not None and not queue_ok:
+                bridge.log(f"Painter is still baking mesh maps for '{bridge._baking}': wait "
+                           "until it finishes", warn=True)
+                return
+            self._busy = True
+            self.update_actions()
+            try:
+                fn()
+            except Exception as ex:
+                bridge.log(f"error: {ex}", warn=True)
+            finally:
+                QtCore.QTimer.singleShot(500, self._unbusy)
+
+        def _unbusy(self):
+            self._busy = False
+            self.update_actions()
+
+        def ask(self, title, text, details="", key=None, danger=False, ok="Continue"):
+            """Yes/no box; Cancel is the default, so Enter or Esc never does damage.
+            ``key``: offers "don't ask again" (only for safe, routine questions)."""
+            if key and not danger and key in self._dont_ask:
+                return True
+            box = QtWidgets.QMessageBox(self)
+            box.setIcon(QtWidgets.QMessageBox.Warning if danger
+                        else QtWidgets.QMessageBox.Question)
+            box.setWindowTitle(title)
+            box.setText(text)
+            if details:
+                box.setInformativeText(details)
+            yes = box.addButton(ok, QtWidgets.QMessageBox.AcceptRole)
+            no = box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+            box.setDefaultButton(no)
+            box.setEscapeButton(no)
+            cb = None
+            if key and not danger:
+                cb = QtWidgets.QCheckBox("Don't ask again until Painter restarts")
+                box.setCheckBox(cb)
+            box.exec()
+            if box.clickedButton() is not yes:
+                bridge.log("cancelled: nothing changed")
+                return False
+            if cb is not None and cb.isChecked():
+                self._dont_ask.add(key)
+            return True
+
+        def _target_names(self, all_sets, name=None):
+            if all_sets:
+                return bridge.texture_set_names()
+            name = name or self.selected()
+            if not name:
+                bridge.log("pick a texture set in the list first", warn=True)
+                return []
+            return [name]
+
+        # -------------------------------------------------------------- actions
+        def do_send(self, all_sets, name=None):
+            names = self._target_names(all_sets, name)
+            if not names:
+                return
+            out = bridge.export_dir()
+            if not out:
+                bridge.export_to_blender(None if all_sets else names[0])   # explains why
+                return
+            what = f"all {len(names)} texture sets" if all_sets else f"'{names[0]}'"
+            details = (f"This replaces the PNG files Blender uses for {what} in:\n{out}\n\n"
+                       "Your Painter project is saved first. Blender reloads the new files.")
+            lit = [n for n in names if bridge.light_layer(n) is not None]
+            if lit:
+                details += (f"\n\n{short_list(lit)} {'has' if len(lit) == 1 else 'have'} baked "
+                            "lighting: Blender will show them unlit (the light is in the colour).")
+            if not self.ask("Send textures to Blender",
+                            f"Painter → Blender: send the textures of {what}?",
+                            details, key="send_all" if all_sets else "send_sel",
+                            ok="Send to Blender"):
+                return
+            bridge.export_to_blender(None if all_sets else names[0])
+
+        def do_get(self, all_sets, name=None):
+            names = self._target_names(all_sets, name)
+            if not names:
+                return
+            times = bridge.blender_base_color_times(names)
+            if not times:
+                bridge.load_from_blender(names)                   # explains why not
+                return
+            cover = [n for n in names if n in times and load_would_cover(bridge.layer_names(n))]
+            stale = older_than(times, bridge.project_saved_time())
+            what = f"{len(times)} texture sets" if all_sets else f"'{names[0]}'"
+            details = ("Adds (or updates) a 'From Blender' fill layer with Base Color, "
+                       "Roughness, Metallic, Emission and Alpha. None of your layers is "
+                       "deleted, and Ctrl+Z undoes it.")
+            if cover:
+                details += (f"\n\n⚠ In {len(cover)} set(s) ({short_list(cover)}) the new "
+                            "layer goes ABOVE your own layers and hides your paint until you "
+                            "hide or delete it.")
+            if stale:
+                details += (f"\n\n⚠ Blender's textures of {short_list(stale)} are OLDER "
+                            "than your last Painter save: Painter probably has the newer work. "
+                            "Did you mean Send to Blender?")
+            danger = bool(cover or stale)
+            if not self.ask("Get textures from Blender",
+                            f"Blender → Painter: load Blender's textures into {what}?",
+                            details, key=None if danger else "get", danger=danger,
+                            ok="Load anyway" if danger else "Load"):
+                return
+            bridge.load_from_blender(names)
+
+        def _kind_changes(self, names):
+            out = []
+            for n in names:
+                have = bridge.light_layer_kind(n)
+                want = bridge.lighting_for(n)
+                if have and want and (have == "lightmap") != is_lightmap(want):
+                    out.append(n)
+            return out
+
+        def do_bake(self, all_sets, name=None):
+            if all_sets:
+                names = list(match_sets(bridge.texture_set_names(), bridge.sets()))
+            else:
+                names = self._target_names(False, name)
+            if not names:
+                bridge.log("no texture set here is linked to Blender: press Send to Painter "
+                           "in Blender", warn=True)
+                return
+            swaps = self._kind_changes(names)
+            borrowed = [n for n in names
+                        if not bridge.lightmap_for(n) and bridge.light_mode == "render"
+                        and not (bridge.set_info(n) or {}).get("environment")]
+            details = ""
+            if swaps:
+                details += (f"⚠ {short_list(swaps)} already {'has' if len(swaps) == 1 else 'have'} "
+                            "a Blender Lighting layer of another kind (Cycles lightmap vs "
+                            "environment filter). It is deleted and made again, so changes you "
+                            "made to it (sliders, opacity, masks) are lost.\n\n")
+            if borrowed:
+                owner = (bridge.data or {}).get("active") or "the last object sent"
+                details += (f"{short_list(borrowed)} {'has' if len(borrowed) == 1 else 'have'} no "
+                            f"lighting of its own and will be lit as if it stood where "
+                            f"'{owner}' is, which can look too blue or too bright. For its own "
+                            "lighting select it in Blender and press Send to Painter (or Bake "
+                            "Lighting to UVs) first.")
+            if all_sets:
+                if not self.ask("Bake Lighting",
+                                f"Blender → Painter: add baked lighting to {len(names)} "
+                                "texture sets?",
+                                (details + "\n\n" if details else "") +
+                                "Missing mesh maps are baked first: this can take a long "
+                                "time and makes the project heavier.",
+                                danger=bool(swaps), ok="Bake all"):
+                    return
+                bridge.bake_lighting(names)
+                return
+            if details and not self.ask("Bake Lighting",
+                                        f"Blender → Painter: bake lighting into '{names[0]}'?",
+                                        details, danger=bool(swaps),
+                                        key=None if swaps else "borrowed", ok="Bake"):
+                return
+            bridge.bake_lighting(names)
+
+        def do_update(self):
+            updates, swaps = bridge.pending_relight()
+            borrowed = [x for x in bridge._lit_record() if bridge.borrows_lighting(x)]
+            if not updates:
+                bridge.log("baked lighting is already up to date"
+                           + (f" ({short_list(borrowed)}: no lighting of their own, left as they "
+                              "are; Send them to Painter from Blender, then Bake Lighting)"
+                              if borrowed else ""))
+                return
+            details = "Sets: " + short_list(updates, 8)
+            if borrowed:
+                details += (f"\n\nLeft as they are: {short_list(borrowed)} (no lighting of "
+                            "their own; they would get another object's lighting).")
+            if swaps:
+                details += (f"\n\n⚠ {short_list(swaps)}: the layer changes kind (Cycles "
+                            "lightmap vs environment filter) and is made again, so changes you "
+                            "made to it are lost. Ctrl+Z undoes it.")
+            if not self.ask("Update baked lighting",
+                            f"Blender → Painter: give {len(updates)} baked lighting "
+                            "layer(s) the lighting Blender sent last?",
+                            details, danger=bool(swaps), key=None if swaps else "update",
+                            ok="Update"):
+                return
+            bridge.refresh_lit_layers(allow_swaps=True)
+            self.refresh()
+
+        def do_remove(self, name=None):
+            names = self._target_names(False, name)
+            if not names:
+                return
+            if bridge.light_layer(names[0]) is None:
+                bridge.log(f"'{names[0]}' has no Blender Lighting layer")
+                return
+            if not self.ask("Remove baked lighting",
+                            f"Delete the 'Blender Lighting' layer of '{names[0]}'?",
+                            "Your 'Lit Paint' layer and its paint stay. Settings you changed on "
+                            "the lighting layer are lost (Ctrl+Z brings it back). Export again "
+                            "so Blender shows the set lit normally.",
+                            danger=True, ok="Delete layer"):
+                return
+            bridge.remove_lighting(names)
+
+        def do_mode(self, mode):
+            bridge.set_light_mode(mode)
+            updates, _swaps = bridge.pending_relight()
+            if updates and not bridge.auto_relight:
+                bridge.log(f"viewport shows Blender's {'Material Preview' if mode == 'preview' else 'Render'} "
+                           f"lighting; {len(updates)} baked lighting layer(s) still show the "
+                           "old lighting: press Update Baked Lighting to change them")
 
         def _auto(self, v):
             bridge.auto_light = v
             if v:
                 bridge.apply_lighting(force=True)
 
+        # ---------------------------------------------------------------- state
         def selected(self):
             it = self.list.currentItem()
             return it.data(QtCore.Qt.UserRole) if it is not None else bridge.active_set_name()
@@ -1851,8 +2537,54 @@ def _make_panel(bridge):
                     self.list.setCurrentItem(it)
                     return
 
-        def set_status(self, text):
+        def set_status(self, text, warn=False):
             self.status.setText(text)
+            if not text:
+                self.status.setStyleSheet("")
+                return
+            c = "#F2994A" if warn else "#6FCF97"
+            self.status.setStyleSheet(f"padding: 4px 6px; border-radius: 4px; color: {c}; "
+                                      f"border: 1px solid {rgba(c, 110)};")
+
+        def update_actions(self):
+            ready = bridge.project_ready()
+            busy = self._busy or bridge._baking is not None
+            sel = self.selected() if ready else None
+            for action, b in self.buttons.items():
+                blocked = self._busy or (bridge._baking is not None and action not in QUEUE_OK)
+                ok = ready and not blocked and (bool(sel) or action not in self.needs_selection)
+                b.setEnabled(ok)
+            if ready and sel:
+                kind = bridge.light_layer_kind(sel)
+                self.buttons["remove_light"].setEnabled(not busy and kind is not None)
+                tags = []
+                if kind == "lightmap":
+                    tags.append("\U0001F4A1 baked lighting (Cycles lightmap)")
+                elif kind == "filter":
+                    tags.append("\U0001F4A1 baked lighting (environment filter)")
+                if bridge.set_info(sel) is None:
+                    tags.append("not linked to Blender")
+                elif not (bridge.set_info(sel) or {}).get("environment") and not bridge.lightmap_for(sel):
+                    tags.append("no lighting of its own")
+                sep = " • "
+                self.target.setText(f"Selected: <b>{sel}</b>"
+                                    + (f"<br><span style='color:#AEB4BB'>{sep.join(tags)}</span>"
+                                       if tags else ""))
+            else:
+                self.target.setText("Selected: <i>none</i> (pick a texture set above)"
+                                    if ready else "<i>Open a project to use these buttons</i>")
+            updates, swaps = bridge.pending_relight() if ready else ([], [])
+            b = self.buttons["update_light"]
+            b.setText(f"Update Baked Lighting ({len(updates)} waiting)" if updates
+                      else "Update Baked Lighting (up to date)")
+            if not updates:
+                b.setEnabled(False)
+            b.setStyleSheet("QPushButton { text-align: left; padding: 3px 8px; }"
+                            + (" QPushButton:enabled { border: 1px solid #F2C94C; "
+                               "border-radius: 3px; color: #F2C94C; }" if updates else ""))
+            self.auto_relight.blockSignals(True)
+            self.auto_relight.setChecked(bridge.auto_relight)
+            self.auto_relight.blockSignals(False)
 
         def refresh(self):
             d = bridge.data
@@ -1862,7 +2594,8 @@ def _make_panel(bridge):
             else:
                 env = d.get("environment") or "none"
                 blend = d.get("blend") or "unsaved .blend"
-                self.info.setText(f"Linked to {blend}. Lighting: {'yes' if env != 'none' else 'not sent'}"
+                self.info.setText(f"Linked to <b>{blend}</b>. Lighting: "
+                                  f"{'yes' if env != 'none' else 'not sent'}"
                                   f"{' (soloing)' if bridge.soloing else ''}")
             for b, mode in ((self.mode_render, "render"), (self.mode_preview, "preview")):
                 b.blockSignals(True)
@@ -1870,6 +2603,7 @@ def _make_panel(bridge):
                 b.blockSignals(False)
             self.mode_preview.setEnabled(bridge.has_preview() or bridge.light_mode == "preview")
             current = self.selected() if self.list.count() else None
+            self.list.blockSignals(True)
             self.list.clear()
             names = bridge.texture_set_names() if bridge.project_ready() else []
             linked = bridge.sets()
@@ -1878,18 +2612,22 @@ def _make_panel(bridge):
             for n in names:
                 tag = []
                 if n in keys:
-                    tag.append("bounds")
                     if linked[keys[n]].get("environment"):
                         tag.append("own lighting")
+                else:
+                    tag.append("not in Blender link")
                 if bridge.lightmap_for(n):
                     tag.append("Cycles lightmap (outdated)" if bridge.lightmap_is_outdated(n)
                                else "Cycles lightmap")
                 if n in lit:
                     tag.append("baked lighting")
-                it = QtWidgets.QListWidgetItem(n + (f"   [{', '.join(tag)}]" if tag else "   [not in Blender link]"))
+                it = QtWidgets.QListWidgetItem(("\U0001F4A1 " if n in lit else "     ") + n
+                                               + (f"   [{', '.join(tag)}]" if tag else ""))
                 it.setData(QtCore.Qt.UserRole, n)
                 self.list.addItem(it)
             self.select_set(current or bridge.active_set_name())
+            self.list.blockSignals(False)
+            self.update_actions()
 
     return Panel()
 
@@ -1898,9 +2636,71 @@ _bridge = None
 _ui_elements = []
 
 
+def _build_menu(menu, panel):
+    """The Texture Plugger menu: the same guarded actions as the panel, grouped."""
+    from PySide6 import QtGui, QtWidgets
+    b = _bridge
+    active = b.active_set_name
+    subs = []
+
+    def submenu(kind, title):
+        # Parented and kept: a bare addMenu() result can be collected by Python,
+        # leaving an empty menu entry.
+        sub = QtWidgets.QMenu(title, menu)
+        sub.setIcon(panel._section_icon(kind))
+        menu.addMenu(sub)
+        subs.append(sub)
+        return sub
+
+    def add(sub, action, text, fn):
+        # Menus are 16 px high: the section's picture as icon, the direction in words.
+        if action:
+            direction, kind = ACTIONS[action]
+            text = f"{text}    ({DIRECTION_WORDS[direction]})"
+        act = QtGui.QAction(text, sub)
+        act.triggered.connect(lambda _=False: panel.run(fn, action in QUEUE_OK))
+        sub.addAction(act)
+
+    light = submenu("light", "Lighting")
+    add(light, "show_light", "Show Blender Lighting in Viewport", lambda: b.apply_lighting(force=True))
+    add(light, "bake_light", "Bake Lighting into Active Texture Set",
+        lambda: panel.do_bake(False, active()))
+    add(light, "bake_all", "Bake Lighting into All Linked Texture Sets…",
+        lambda: panel.do_bake(True))
+    add(light, "update_light", "Update Baked Lighting…", panel.do_update)
+    light.addSeparator()
+    add(light, None, "Light from Blender's Render", lambda: panel.do_mode("render"))
+    add(light, None, "Light from Blender's Material Preview", lambda: panel.do_mode("preview"))
+    light.addSeparator()
+    add(light, "remove_light", "Remove Baked Lighting from Active Texture Set…",
+        lambda: panel.do_remove(active()))
+
+    tex = submenu("texture", "Textures")
+    add(tex, "send_sel", "Send Active Texture Set to Blender…",
+        lambda: panel.do_send(False, active()))
+    add(tex, "send_all", "Send All to Blender…", lambda: panel.do_send(True))
+    tex.addSeparator()
+    add(tex, "get_sel", "Get Active Texture Set from Blender…",
+        lambda: panel.do_get(False, active()))
+    add(tex, "get_all", "Get All from Blender…", lambda: panel.do_get(True))
+
+    view = submenu("view", "View")
+    add(view, "match_view", "Match Blender Camera", lambda: b.match_view())
+    add(view, "solo", "Solo Active Texture Set", lambda: b.solo())
+    add(view, "frame", "Frame Active Texture Set", lambda: b.frame_set(active()))
+    add(view, "show_all", "Show All", lambda: b.unsolo())
+    view.addSeparator()
+    for text, args in (("Orbit Left", dict(yaw=-15.0)), ("Orbit Right", dict(yaw=15.0)),
+                       ("Orbit Up", dict(pitch=10.0)), ("Orbit Down", dict(pitch=-10.0)),
+                       ("Zoom In", dict(zoom=0.8)), ("Zoom Out", dict(zoom=1.25))):
+        add(view, None, text, lambda a=args: b.orbit(**a))
+    menu._tp_submenus = subs
+    return subs
+
+
 def start_plugin():
     global _bridge
-    from PySide6 import QtGui, QtWidgets
+    from PySide6 import QtWidgets
     import substance_painter.ui as ui
     _bridge = Bridge()
     panel = _make_panel(_bridge)
@@ -1909,34 +2709,7 @@ def start_plugin():
     _ui_elements.append(dock)
 
     menu = QtWidgets.QMenu("Texture Plugger", ui.get_main_window())
-    for text, fn in (("Solo Active Texture Set", lambda: _bridge.solo()),
-                     ("Show All", lambda: _bridge.unsolo()),
-                     ("Frame Active Texture Set", lambda: _bridge.frame_set(_bridge.active_set_name())),
-                     ("Orbit Left", lambda: _bridge.orbit(yaw=-15.0)),
-                     ("Orbit Right", lambda: _bridge.orbit(yaw=15.0)),
-                     ("Orbit Up", lambda: _bridge.orbit(pitch=10.0)),
-                     ("Orbit Down", lambda: _bridge.orbit(pitch=-10.0)),
-                     ("Zoom In", lambda: _bridge.orbit(zoom=0.8)),
-                     ("Zoom Out", lambda: _bridge.orbit(zoom=1.25)),
-                     ("Match Blender View", lambda: _bridge.match_view()),
-                     ("Apply Blender Lighting", lambda: _bridge.apply_lighting(force=True)),
-                     ("Export to Blender", lambda: _bridge.export_to_blender()),
-                     ("Export Active Texture Set to Blender",
-                      lambda: _bridge.export_to_blender(_bridge.active_set_name())),
-                     ("Load from Blender", lambda: _bridge.load_from_blender()),
-                     ("Load Active Texture Set from Blender",
-                      lambda: _bridge.load_from_blender([_bridge.active_set_name()])),
-                     ("Bake Lighting into Active Texture Set",
-                      lambda: _bridge.bake_lighting([_bridge.active_set_name()])),
-                     ("Bake Lighting into All Linked Texture Sets",
-                      lambda: _bridge.bake_lighting_all()),
-                     ("Remove Baked Lighting from Active Texture Set",
-                      lambda: _bridge.remove_lighting([_bridge.active_set_name()])),
-                     ("Lighting: Blender Render", lambda: _bridge.set_light_mode("render")),
-                     ("Lighting: Blender Material Preview", lambda: _bridge.set_light_mode("preview"))):
-        act = QtGui.QAction(text, menu)
-        act.triggered.connect(fn)
-        menu.addAction(act)
+    _build_menu(menu, panel)
     ui.add_menu(menu)
     _ui_elements.append(menu)
     _bridge.menu = menu
