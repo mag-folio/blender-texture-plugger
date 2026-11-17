@@ -789,7 +789,14 @@ def sets_payload(context):
 # --------------------------------------------------------------------------
 
 def painter_documents():
-    """Painter's user folder (Documents/Adobe/Adobe Substance 3D Painter)."""
+    """Painter's user folder (Documents/Adobe/Adobe Substance 3D Painter).
+
+    ``TP_PAINTER_USER_DIR`` overrides it (the test runner points it at a
+    sandbox, so tests never touch the real link folder or installed plugin).
+    """
+    override = os.environ.get("TP_PAINTER_USER_DIR")
+    if override:
+        return override
     docs = ""
     if sys.platform == "win32":
         try:

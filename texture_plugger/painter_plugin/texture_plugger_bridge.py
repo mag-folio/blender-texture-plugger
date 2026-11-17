@@ -34,7 +34,7 @@ import json
 import math
 import os
 
-PLUGIN_VERSION = "1.5.0"
+PLUGIN_VERSION = "1.5.1"
 LINK_FILE = "blender_link.json"
 LINK_DIR_NAME = "texture_plugger_link"
 FRAME_MARGIN = 1.15
@@ -324,6 +324,20 @@ META_LIT_KEY = "lit_environments"
 # The filter's "Horizontal Rotation" (in turns, 0..1) that lines its environment up
 # with Painter's viewport environment, which the Blender map is already turned to.
 FILTER_YAW_TURNS = 0.0
+
+
+def passthrough_mode(blending_mode_enum):
+    """Painter's Passthrough blending mode.
+
+    Painter 12.2's documentation calls it ``BlendingMode.PassThrough``, but the
+    application itself names it ``Passthrough`` (measured: "type object
+    'BlendingMode' has no attribute 'PassThrough'"), so accept either spelling.
+    """
+    for name in ("Passthrough", "PassThrough"):
+        mode = getattr(blending_mode_enum, name, None)
+        if mode is not None:
+            return mode
+    raise RuntimeError("Painter has no Passthrough blending mode")
 
 
 def file_stem(path):
@@ -916,13 +930,17 @@ class Bridge:
             ls.delete_node(layer)                    # was the lightmap version
             layer = None
         created = paint = None
+        passthrough = passthrough_mode(ls.BlendingMode)
         with ls.ScopedModification("Blender lighting"):
             if layer is None:
                 layer = ls.insert_paint(self._insert_position(set_name))
                 layer.set_name(LIGHT_LAYER_NAME)
-                # Passthrough: the filter works on everything below this layer
-                layer.set_blending_mode(ls.BlendingMode.PassThrough, ts.ChannelType.BaseColor)
                 created = True
+            # Passthrough: the filter works on everything below this layer.  Set on
+            # every press, so a layer left half-made by an earlier failed press
+            # (Normal blending, no filter) is repaired, not reused as it is.
+            if layer.get_blending_mode(ts.ChannelType.BaseColor) != passthrough:
+                layer.set_blending_mode(passthrough, ts.ChannelType.BaseColor)
             filt = next((e for e in layer.content_effects()
                          if isinstance(e, ls.FilterEffectNode)), None)
             new_filter = filt is None
